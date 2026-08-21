@@ -4,6 +4,8 @@ All notable changes to Leakscan are documented here.
 
 ## Unreleased
 
+- Replaced broad single-word archive-index fallbacks with full phrase, slug, URL, hash, or object-ID fingerprints.
+
 ## 1.1.0 - 2026-08-21
 
 - Applied the configured per-host delay to search-provider HTTP requests.

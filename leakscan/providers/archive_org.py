@@ -2,28 +2,17 @@
 
 from __future__ import annotations
 
-import re
-
 import httpx
 
 from ..models import SearchResult
-from .base import SearchProvider, strip_archive_suffix
+from .base import SearchProvider, archive_index_pattern
 
 
 class ArchiveOrgProvider(SearchProvider):
     name = "archive_org"
 
     def _pattern(self, query: str) -> str:
-        cleaned = query.replace('"', "").strip()
-        match = re.search(r"https?://([^\s]+)", cleaned)
-        if match:
-            return match.group(1).rstrip("/") + "*"
-        tokens = [
-            strip_archive_suffix(token, self.archive_extensions)
-            for token in re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
-        ]
-        tokens = [token for token in tokens if token]
-        return "*" + max(tokens, key=len) + "*" if tokens else ""
+        return archive_index_pattern(query, self.archive_extensions)
 
     def request_key(self, query: str) -> str:
         return self._pattern(query).casefold()

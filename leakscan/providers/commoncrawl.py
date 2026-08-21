@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-import re
 
 import httpx
 
 from ..models import SearchResult
-from .base import ProviderUnavailable, SearchProvider, strip_archive_suffix
+from .base import ProviderUnavailable, SearchProvider, archive_index_pattern
 
 
 class CommonCrawlProvider(SearchProvider):
@@ -25,18 +24,7 @@ class CommonCrawlProvider(SearchProvider):
         return self._index_url
 
     def _pattern(self, query: str) -> str:
-        cleaned = query.replace('"', "").strip()
-        url_match = re.search(r"https?://([^\s]+)", cleaned)
-        if url_match:
-            return url_match.group(1).rstrip("/") + "*"
-        tokens = [
-            strip_archive_suffix(token, self.archive_extensions)
-            for token in re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
-        ]
-        tokens = [token for token in tokens if token]
-        if not tokens:
-            return ""
-        return "*" + max(tokens, key=len) + "*"
+        return archive_index_pattern(query, self.archive_extensions)
 
     def request_key(self, query: str) -> str:
         return self._pattern(query).casefold()

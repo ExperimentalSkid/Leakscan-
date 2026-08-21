@@ -9,6 +9,7 @@ from leakscan.database import CaseDatabase
 from leakscan.http import HostRateLimiter
 from leakscan.providers.archive_org import ArchiveOrgProvider
 from leakscan.providers.base import ProviderUnavailable, SearchProvider
+from leakscan.providers.commoncrawl import CommonCrawlProvider
 from leakscan.providers.urlscan import URLScanProvider
 from leakscan.search import SearchEngine
 
@@ -105,6 +106,29 @@ async def test_equivalent_provider_requests_are_sent_once(app_config) -> None:
 def test_archive_index_deduplicates_extension_variants() -> None:
     provider = ArchiveOrgProvider()
     assert provider.request_key('"Example Dataset.7z"') == provider.request_key('"Example Dataset.zip"')
+
+
+@pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
+def test_archive_index_keeps_full_phrase_fingerprint(provider: SearchProvider) -> None:
+    pattern = provider.request_key('"Example - National Customer Archive.7z"')
+
+    assert pattern == "*example---national-customer-archive*"
+    assert pattern != "*national*"
+
+
+@pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
+def test_archive_index_skips_weak_single_word_fallback(provider: SearchProvider) -> None:
+    assert provider.request_key('"National"') == ""
+
+
+@pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
+def test_archive_index_preserves_object_identifier(provider: SearchProvider) -> None:
+    assert provider.request_key('"f6UKALOfa0GZmo"') == "*f6ukalofa0gzmo*"
+
+
+@pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
+def test_archive_index_extracts_identifier_from_site_query(provider: SearchProvider) -> None:
+    assert provider.request_key("site:example.test f6UKALOfa0GZmo") == "*f6ukalofa0gzmo*"
 
 
 @pytest.mark.asyncio

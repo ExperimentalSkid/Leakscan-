@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 
@@ -123,3 +124,40 @@ def strip_archive_suffix(value: str, extensions: list[str] | tuple[str, ...]) ->
     if suffix:
         return value[:-len(suffix)]
     return re.sub(r"(?i)(?:\.part\d+\.rar|\.7z\.\d{3}|\.\d{3})$", "", value)
+
+
+def archive_index_pattern(query: str, extensions: list[str] | tuple[str, ...]) -> str:
+    """Build a target-specific URL wildcard without falling back to a broad word."""
+    cleaned = query.replace('"', "").strip()
+    url_match = re.search(r"https?://([^\s]+)", cleaned)
+    if url_match:
+        return url_match.group(1).rstrip("/") + "*"
+
+    quoted_match = re.search(r'"([^\"]+)"', query)
+    fingerprint = unquote(quoted_match.group(1) if quoted_match else query).strip()
+    fingerprint = strip_archive_suffix(fingerprint, extensions).strip()
+
+    if quoted_match and any(character.isspace() for character in fingerprint):
+        slug = re.sub(r"\s+", "-", fingerprint)
+        slug = re.sub(r"[^A-Za-z0-9_.-]+", "", slug).strip(".-_")
+        if len(slug) >= 12 and "-" in slug:
+            return f"*{slug}*"
+
+    tokens = [
+        strip_archive_suffix(token, extensions)
+        for token in re.findall(r"[A-Za-z0-9_.-]{6,}", fingerprint)
+    ]
+    strong_tokens = [
+        token
+        for token in tokens
+        if token and (
+            is_probable_hash(token)
+            or (len(token) >= 12 and any(separator in token for separator in "_-."))
+            or (
+                len(token) >= 12
+                and any(character.isalpha() for character in token)
+                and any(character.isdigit() for character in token)
+            )
+        )
+    ]
+    return f"*{max(strong_tokens, key=len)}*" if strong_tokens else ""
