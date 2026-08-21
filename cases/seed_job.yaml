@@ -1,0 +1,21 @@
+case:
+  name: seed_job
+  seeds:
+    - url: "https://biteblob.com/Information/f6UKALOfa0GZmo/#CNSS%20-%20Moroccan%20National%20Social%20Security%20Fund.7z"
+      source: biteblob
+      adapter: biteblob
+  item_ids:
+    - f6UKALOfa0GZmo
+  filenames:
+    - "CNSS - Moroccan National Social Security Fund.7z"
+  reported_sizes:
+    - "549.04 MB"
+  distinctive_phrases:
+    - Moroccan National Social Security Fund
+  aliases:
+    - CNSS Morocco
+    - CNSS_Morocco
+    - CNSS-Morocco
+    - Caisse Nationale de Securite Sociale Maroc
+  translated_descriptors: []
+  exclusion_terms: []

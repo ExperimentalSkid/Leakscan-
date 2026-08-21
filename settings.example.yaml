@@ -1,0 +1,45 @@
+# Copy this file when you want to override Leakscan's bundled defaults.
+crawl:
+  max_depth: 3
+  max_pages_per_domain: 100
+  max_pages: 5000
+  concurrency: 10
+  timeout_seconds: 15
+  retry_count: 2
+  retry_backoff_seconds: 1.0
+  per_host_delay_seconds: 1.0
+  max_html_bytes: 2097152
+  max_redirects: 10
+  respect_robots_txt: true
+  user_agent: "Leakscan/1.0 (+public-reference research; metadata-only archive checks)"
+
+search:
+  providers:
+    - duckduckgo
+    - commoncrawl
+    - archive_org
+    - urlscan
+    - brave
+    - bing
+    - google
+    - github
+    - gitlab
+    - virustotal
+    - otx
+  results_per_query: 20
+  max_queries_per_provider: 80
+  max_pivot_rounds: 20
+  max_pivots_per_round: 50
+  safe_search: "off"
+  intent_terms: [leak, breach, dump, mirror, download]
+
+scoring:
+  likely_threshold: 50
+  high_confidence_threshold: 90
+  filename_similarity_threshold: 95
+  size_tolerance_fraction: 0.08
+
+safety:
+  archive_extensions: [.7z, .zip, .rar, .tar, .gz, .bz2, .xz]
+  allowed_schemes: [http, https]
+  reject_private_networks: true

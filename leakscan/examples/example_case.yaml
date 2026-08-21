@@ -1,0 +1,18 @@
+case:
+  name: example_investigation
+  seeds:
+    - url: "https://public-catalog.example/information/example-item-id"
+      source: public_catalog
+      adapter: auto
+  item_ids:
+    - example-item-id
+  filenames:
+    - "Example Dataset.7z"
+  reported_sizes:
+    - "500 MB"
+  distinctive_phrases:
+    - Example Dataset
+  aliases:
+    - Example_Dataset
+  translated_descriptors: []
+  exclusion_terms: []

@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a generic crawler, provider, verification, or reporting improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What investigation workflow is difficult today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the generic behavior and expected output.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Network and evidence considerations
+      description: Note any impact on access scope, request volume, sensitive data, or archive-body handling.
