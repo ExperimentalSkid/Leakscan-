@@ -20,7 +20,7 @@ from .host_verifiers import (
 from .http import SafeHTTPClient
 from .models import FetchResult, Finding
 from .parser import context_excerpt, parse_page
-from .scoring import classify, score_candidate, size_matches, target_size_ranges
+from .scoring import classify, has_case_correlation, score_candidate, size_matches, target_size_ranges
 from .utils.time import utc_now
 from .utils.urls import (
     content_headers_indicate_binary,
@@ -139,6 +139,7 @@ class Crawler:
             first_seen=item["created_at"], last_checked=now,
             notes=fetch.blocked_reason or fetch.error, original_url=item["original_url"],
             normalized_url=item["normalized_url"], redirect_chain=fetch.redirect_chain,
+            relation=_supporting_reference_relation(item),
             verification_point=fetch.verification_point,
         )
         self.database.record_finding(finding)
@@ -219,7 +220,8 @@ class Crawler:
             classification=classification, first_seen=item["created_at"], last_checked=now,
             notes="Metadata-only verification; archive body was not consumed.",
             original_url=item["original_url"], normalized_url=item["normalized_url"],
-            evidence_path=str(evidence_path), verification_point=verification,
+            evidence_path=str(evidence_path), relation=_supporting_reference_relation(item),
+            verification_point=verification,
         )
         self.database.record_finding(finding)
         label = "CANDIDATE" if classification not in {"DEAD", "BLOCKED", "TAKEN_DOWN"} else classification
@@ -229,7 +231,11 @@ class Crawler:
     async def _record_page_finding(self, item: dict, fetch: FetchResult, depth: int) -> None:
         final_url = fetch.final_url or item["normalized_url"]
         parsed = parse_page(fetch.body, final_url, fetch.headers.get("content-type", ""))
-        report_artifact_type = self._artifact_report_types.get(normalize_url(final_url), "")
+        report_artifact_type = (
+            self._artifact_report_types.get(normalize_url(final_url), "")
+            or self._artifact_report_types.get(item["normalized_url"], "")
+        )
+        reference_kind = item.get("reference_kind", "")
         parsed_hashes = [
             {
                 **item,
@@ -323,6 +329,7 @@ class Crawler:
             notes="HTML/text evidence observed directly." + (" Response truncated at configured ceiling." if fetch.truncated else ""),
             original_url=item["original_url"], normalized_url=item["normalized_url"],
             evidence_sha256=evidence_hash, evidence_path=evidence_path,
+            relation=_supporting_reference_relation(item),
         )
         self.database.record_finding(finding)
         canonical = normalize_url(parsed.canonical_url) if parsed.canonical_url else ""
@@ -331,6 +338,8 @@ class Crawler:
         if scored.score >= self.config.scoring.likely_threshold:
             for hash_item in parsed_hashes:
                 if hash_item.get("artifact_type"):
+                    continue
+                if reference_kind == "analysis_artifact":
                     continue
                 if not _hash_is_contextual(parsed.text, hash_item["value"], self.database.pivot_map()):
                     continue
@@ -357,19 +366,25 @@ class Crawler:
                 self.config, normalized, context=link_context, fingerprints=self.database.pivot_map()
             )
             same_host = hostname_for(normalized) == hostname_for(final_url)
-            archive = looks_like_archive_url(normalized, self.config.safety.archive_extensions)
+            target_correlated = has_case_correlation(link_score)
             action_link = (
-                same_host
-                and scored.score >= self.config.scoring.likely_threshold
+                scored.score >= self.config.scoring.likely_threshold
                 and any(term in link_context.lower() for term in ("download", "mirror", "file", "archive"))
+                and (same_host or not report_artifact_type)
+                and not reference_kind
             )
-            if archive or link_score.score > 0 or action_link:
+            if target_correlated or action_link:
                 added = self.database.enqueue_url(
                     link, normalized, referrer_url=final_url, source=item["source"], query=item["query_text"],
                     depth=depth + 1, priority=link_score.score,
                 )
                 if not added:
                     self.database.add_relationship(final_url, normalized, "duplicate_listing", "rediscovered link")
+
+
+def _supporting_reference_relation(item: dict) -> str:
+    kind = item.get("reference_kind", "")
+    return f"supporting_reference:{kind}" if kind else ""
 
 
 def _filename_from_disposition(value: str) -> str:

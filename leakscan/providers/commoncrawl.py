@@ -12,6 +12,7 @@ from .base import ProviderUnavailable, SearchProvider, archive_index_pattern
 
 class CommonCrawlProvider(SearchProvider):
     name = "commoncrawl"
+    query_capabilities = frozenset({"filename", "identifier", "phrase", "site", "url"})
     _index_url = ""
 
     async def _latest_index(self, client: httpx.AsyncClient) -> str:

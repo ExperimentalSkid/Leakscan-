@@ -70,7 +70,10 @@ class CrawlConfig:
 class SearchConfig:
     providers: list[str] = field(default_factory=list)
     results_per_query: int = 20
-    max_queries_per_provider: int = 15
+    max_result_pages_per_query: int = 3
+    max_queries_per_provider: int = 60
+    minimum_queries_before_plateau: int = 45
+    stop_after_stale_queries: int = 10
     max_pivot_rounds: int = 20
     max_pivots_per_round: int = 50
     provider_failure_threshold: int = 2
@@ -91,8 +94,9 @@ class ScoringConfig:
 class SafetyConfig:
     archive_extensions: list[str] = field(default_factory=lambda: [
         ".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz",
-        ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".zst", ".zipx",
-        ".7z.001", ".part01.rar", ".001",
+        ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+        ".tar.zst", ".tzst", ".zst", ".zipx", ".7z.001", ".zip.001",
+        ".part1.rar", ".part01.rar", ".cab", ".iso", ".001",
     ])
     allowed_schemes: list[str] = field(default_factory=lambda: ["http", "https"])
     reject_private_networks: bool = True
@@ -254,6 +258,10 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
             suffix = Path(filename).suffix.lstrip(".")
             if suffix:
                 queries.append(f'"{item_id}" "{suffix}"')
+    # Cover every configured archive extension inside the default discovery
+    # floor. Provider request-key deduplication still collapses equivalent
+    # archive-index lookups before any network request is made.
+    queries.extend(deferred_filename_variants)
     queries.extend(f'"{digest}"' for digest in sorted(values["hash"] | values["artifact_hash"]))
     queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
     queries.extend(
@@ -274,6 +282,5 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
             queries.extend(f'"{anchor}" "{size}"' for anchor in anchors[:5])
         else:
             queries.append(f'"{size}"')
-    queries.extend(deferred_filename_variants)
     queries.extend(deferred_intent_queries)
     return list(dict.fromkeys(queries))

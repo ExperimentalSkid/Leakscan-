@@ -20,9 +20,11 @@ def test_archive_detection_uses_path_not_query():
 
 
 def test_compound_and_split_archive_paths_are_detected():
-    extensions = [".tar.gz", ".7z.001", ".part01.rar"]
+    extensions = [".tar.gz", ".7z.001", ".zip.001", ".part1.rar", ".part01.rar"]
     assert looks_like_archive_url("https://example.com/files/sample.tar.gz", extensions)
     assert looks_like_archive_url("https://example.com/files/sample.7z.001", extensions)
+    assert looks_like_archive_url("https://example.com/files/sample.zip.001", extensions)
+    assert looks_like_archive_url("https://example.com/files/sample.part1.rar", extensions)
     assert looks_like_archive_url("https://example.com/files/sample.part01.rar", extensions)
 
 

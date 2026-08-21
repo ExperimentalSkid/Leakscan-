@@ -13,9 +13,9 @@ from .config import AppConfig
 from .crawler import Crawler
 from .database import CaseDatabase
 from .http import HostRateLimiter, SafeHTTPClient
-from .models import Finding
+from .models import Finding, SearchBatch
 from .providers import build_providers
-from .providers.base import ProviderUnavailable
+from .providers.base import ProviderRequestBudgetExhausted, ProviderUnavailable, SearchProvider
 from .scoring import score_candidate
 from .utils.time import utc_now
 from .utils.urls import filename_from_url, normalize_url
@@ -23,11 +23,52 @@ from .utils.urls import filename_from_url, normalize_url
 LOG = logging.getLogger(__name__)
 
 
+class ProviderRequestMeter:
+    """Count and enforce provider budgets at the actual HTTP request boundary."""
+
+    def __init__(self, database: CaseDatabase, maximum: int):
+        self.database = database
+        self.maximum = maximum
+        self.provider: SearchProvider | None = None
+
+    def activate(self, provider: SearchProvider) -> None:
+        self.provider = provider
+        provider.bind_request_budget(self.remaining)
+
+    def deactivate(self) -> None:
+        if self.provider is not None:
+            self.provider.bind_request_budget(None)
+        self.provider = None
+
+    def remaining(self) -> int | None:
+        if self.provider is None or self.maximum <= 0:
+            return None
+        return max(0, self.maximum - self.database.provider_request_count(self.provider.name))
+
+    async def on_request(self, _request: httpx.Request) -> None:
+        provider = self.provider
+        if provider is None:
+            return
+        if self.remaining() == 0:
+            raise ProviderRequestBudgetExhausted(
+                f"provider request budget exhausted ({self.maximum})"
+            )
+        await provider.wait_for_request_slot()
+        self.database.increment_provider_request_count(provider.name)
+
+
 class SearchEngine:
-    def __init__(self, config: AppConfig, database: CaseDatabase):
+    def __init__(
+        self,
+        config: AppConfig,
+        database: CaseDatabase,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.config = config
         self.database = database
         self.providers = build_providers()
+        self.transport = transport
 
     async def run(
         self,
@@ -39,13 +80,17 @@ class SearchEngine:
         names = provider_names or self.config.search.providers
         total = 0
         rate_limiter = HostRateLimiter(self.config.crawl.per_host_delay_seconds)
+        request_meter = ProviderRequestMeter(
+            self.database, self.config.search.max_queries_per_provider
+        )
         crawler = Crawler(self.config, self.database) if verify_immediately else None
         async with AsyncExitStack() as stack:
             client = await stack.enter_async_context(httpx.AsyncClient(
                 timeout=httpx.Timeout(self.config.crawl.timeout_seconds),
                 follow_redirects=True,
                 headers={"User-Agent": self.config.crawl.user_agent},
-                event_hooks={"request": [rate_limiter.on_request]},
+                event_hooks={"request": [request_meter.on_request, rate_limiter.on_request]},
+                transport=self.transport,
             ))
             verifier_http = (
                 await stack.enter_async_context(SafeHTTPClient(self.config))
@@ -59,6 +104,7 @@ class SearchEngine:
                     continue
                 provider.safe_search = self.config.search.safe_search
                 provider.archive_extensions = self.config.safety.archive_extensions
+                provider.max_result_pages_per_query = self.config.search.max_result_pages_per_query
                 available, reason = provider.available()
                 if not available:
                     LOG.info("[SKIP] %s %s", name, reason)
@@ -83,6 +129,8 @@ class SearchEngine:
                 unfinished = [query for query in queries if self.database.query_status(name, query) != "done"]
                 request_groups: dict[str, list[str]] = {}
                 for query in unfinished:
+                    if not provider.accepts_query(query):
+                        continue
                     request_key = provider.request_key(query)
                     if not request_key:
                         continue
@@ -92,23 +140,37 @@ class SearchEngine:
                     grouped_queries = grouped_queries[:requests_remaining]
                 if grouped_queries:
                     LOG.info(
-                        "[PLAN:%s] request_groups=%s persistent_budget=%s used=%s",
+                        "[PLAN:%s] request_groups=%s persistent_budget=%s used=%s plateau_after=%s stale_window=%s",
                         name,
                         len(grouped_queries),
                         request_budget if request_budget > 0 else "unlimited",
                         requests_used,
+                        self.config.search.minimum_queries_before_plateau,
+                        self.config.search.stop_after_stale_queries,
                     )
                 consecutive_failures = 0
+                consecutive_stale = 0
                 provider_new = 0
                 provider_duplicates = 0
                 for request_number, equivalent_queries in enumerate(grouped_queries, start=1):
+                    request_meter.activate(provider)
+                    if request_meter.remaining() == 0:
+                        request_meter.deactivate()
+                        LOG.info("[BUDGET:%s] actual HTTP request budget exhausted", name)
+                        break
                     query = equivalent_queries[0]
                     for equivalent in equivalent_queries:
                         self.database.add_query(name, equivalent)
                     LOG.info('[SEARCH:%s %s/%s] %s', name, request_number, len(grouped_queries), query)
+                    requests_before = self.database.provider_request_count(name)
                     try:
-                        self.database.increment_provider_request_count(name)
-                        results = await provider.search(client, query, self.config.search.results_per_query)
+                        response = await provider.search(client, query, self.config.search.results_per_query)
+                    except ProviderRequestBudgetExhausted:
+                        LOG.info(
+                            "[PARTIAL:%s] request budget ended during pagination; query remains resumable",
+                            name,
+                        )
+                        break
                     except Exception as exc:  # noqa: BLE001 - circuit breaker isolates provider failures.
                         error = f"{type(exc).__name__}: {exc}"
                         for equivalent in equivalent_queries:
@@ -139,6 +201,20 @@ class SearchEngine:
                             )
                             break
                         continue
+                    finally:
+                        request_meter.deactivate()
+                    if isinstance(response, SearchBatch):
+                        results = response.results
+                        query_complete = response.complete
+                    else:
+                        results = response
+                        query_complete = True
+                    requests_sent = self.database.provider_request_count(name)
+                    LOG.debug(
+                        "[REQUESTS:%s] query used %s actual HTTP request(s)",
+                        name,
+                        requests_sent - requests_before,
+                    )
                     consecutive_failures = 0
                     count = 0
                     newly_enqueued = 0
@@ -160,6 +236,7 @@ class SearchEngine:
                             "record_url": result.source_url,
                             "record_id": result.record_id,
                             "candidate_url": normalized,
+                            "record_metadata": result.metadata,
                         }
                         finding = Finding(
                             timestamp_utc=now, source=name, query=query, discovery_method="search_result",
@@ -168,18 +245,27 @@ class SearchEngine:
                             page_title=result.title, context_excerpt=result.excerpt[:1000], depth=0,
                             score=score.score, score_reasons=score.reasons,
                             classification=(
-                                "UNVERIFIED"
-                                if score.score >= self.config.scoring.likely_threshold
-                                else "REFERENCE_ONLY"
+                                "REFERENCE_ONLY"
+                                if result.reference_kind
+                                else (
+                                    "UNVERIFIED"
+                                    if score.score >= self.config.scoring.likely_threshold
+                                    else "REFERENCE_ONLY"
+                                )
                             ),
                             first_seen=result.published or now, last_checked="",
-                            notes="Provider metadata is a third-party/index observation; URL not yet fetched.",
+                            notes="Provider/API metadata observation; candidate URL not yet directly verified.",
                             original_url=result.url, normalized_url=normalized,
+                            relation=(
+                                f"supporting_reference:{result.reference_kind}"
+                                if result.reference_kind else ""
+                            ),
                             detection_point=detection_point,
                         )
                         self.database.record_finding(finding)
                         added = self.database.enqueue_url(
-                            result.url, normalized, source=name, query=query, depth=0, priority=score.score
+                            result.url, normalized, source=name, query=query,
+                            reference_kind=result.reference_kind, depth=0, priority=score.score,
                         )
                         if added:
                             newly_enqueued += 1
@@ -189,12 +275,19 @@ class SearchEngine:
                             provider_duplicates += 1
                             LOG.debug("[SEEN] duplicate provider observation %s", normalized)
                         count += 1
-                    for equivalent in equivalent_queries:
-                        self.database.finish_query(name, equivalent, count)
+                    if query_complete:
+                        for equivalent in equivalent_queries:
+                            self.database.finish_query(name, equivalent, count)
+                    else:
+                        LOG.info(
+                            "[PARTIAL:%s] pagination stopped at the request budget; query remains resumable",
+                            name,
+                        )
                     total += count
                     if newly_enqueued and crawler is not None and verifier_http is not None:
                         LOG.info("[VERIFY-NOW] processing %s newly unique candidate(s)", newly_enqueued)
                         await crawler.run_pending(verifier_http)
+                    consecutive_stale = 0 if newly_enqueued else consecutive_stale + 1
                     cooldown_seconds = provider.consume_rate_limit_cooldown()
                     if cooldown_seconds is not None:
                         seconds = cooldown_seconds or self.config.search.provider_rate_limit_cooldown_seconds
@@ -207,6 +300,19 @@ class SearchEngine:
                             "[CIRCUIT:%s] quota exhausted; provider paused for %.0f seconds",
                             name,
                             seconds,
+                        )
+                        break
+                    plateau_minimum = self.config.search.minimum_queries_before_plateau
+                    plateau_window = self.config.search.stop_after_stale_queries
+                    if (
+                        plateau_window > 0
+                        and requests_sent >= plateau_minimum
+                        and consecutive_stale >= plateau_window
+                    ):
+                        LOG.info(
+                            "[PLATEAU:%s] stopped after %s consecutive requests found no new canonical URLs",
+                            name,
+                            consecutive_stale,
                         )
                         break
                 if provider_new or provider_duplicates:

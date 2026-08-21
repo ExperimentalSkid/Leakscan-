@@ -30,6 +30,17 @@ class FakeProvider(SearchProvider):
         return self.behavior(query)
 
 
+class HTTPFakeProvider(FakeProvider):
+    async def search(self, client, query: str, limit: int):
+        self.calls += 1
+        await client.get("https://provider.example/search", params={"q": query})
+        return self.behavior(query)
+
+
+def mock_transport() -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(200, json={}, request=request))
+
+
 @pytest.mark.asyncio
 async def test_provider_requests_honor_host_delay(monkeypatch) -> None:
     clock = [100.0]
@@ -47,6 +58,26 @@ async def test_provider_requests_honor_host_delay(monkeypatch) -> None:
     await limiter.wait("https://provider.example/search?q=two")
 
     assert sleeps == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_provider_specific_minimum_interval(monkeypatch) -> None:
+    clock = [100.0]
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr("leakscan.providers.base.monotonic", lambda: clock[0])
+    monkeypatch.setattr("leakscan.providers.base.asyncio.sleep", fake_sleep)
+    provider = FakeProvider(lambda _query: [])
+    provider.minimum_request_interval_seconds = 12
+
+    await provider.wait_for_request_slot()
+    await provider.wait_for_request_slot()
+
+    assert sleeps == [12]
 
 
 @pytest.mark.asyncio
@@ -92,8 +123,8 @@ async def test_access_denial_disables_provider_after_one_request(app_config, sta
 @pytest.mark.asyncio
 async def test_equivalent_provider_requests_are_sent_once(app_config) -> None:
     database = CaseDatabase(app_config.output_dir / "state.sqlite3")
-    provider = FakeProvider(lambda _query: [])
-    engine = SearchEngine(app_config, database)
+    provider = HTTPFakeProvider(lambda _query: [])
+    engine = SearchEngine(app_config, database, transport=mock_transport())
     engine.providers = {"fake": provider}
     try:
         await engine.run(["same:first", "same:second"], ["fake"])
@@ -193,8 +224,8 @@ async def test_successful_final_quota_request_opens_persisted_cooldown(app_confi
 async def test_provider_request_budget_persists_across_pivot_rounds(app_config) -> None:
     app_config.search.max_queries_per_provider = 2
     database = CaseDatabase(app_config.output_dir / "state.sqlite3")
-    provider = FakeProvider(lambda _query: [])
-    engine = SearchEngine(app_config, database)
+    provider = HTTPFakeProvider(lambda _query: [])
+    engine = SearchEngine(app_config, database, transport=mock_transport())
     engine.providers = {"fake": provider}
     try:
         await engine.run(["one:first", "two:second", "three:third"], ["fake"])
@@ -202,6 +233,24 @@ async def test_provider_request_budget_persists_across_pivot_rounds(app_config) 
 
         assert provider.calls == 2
         assert database.provider_request_count("fake") == 2
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_stops_after_adaptive_plateau(app_config) -> None:
+    app_config.search.max_queries_per_provider = 60
+    app_config.search.minimum_queries_before_plateau = 3
+    app_config.search.stop_after_stale_queries = 2
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    provider = HTTPFakeProvider(lambda _query: [])
+    engine = SearchEngine(app_config, database, transport=mock_transport())
+    engine.providers = {"fake": provider}
+    try:
+        await engine.run([f"query-{index}" for index in range(20)], ["fake"])
+
+        assert provider.calls == 3
+        assert database.provider_request_count("fake") == 3
     finally:
         database.close()
 

@@ -15,7 +15,7 @@ from .host_verifiers import reference_route_classification
 from .http import SafeHTTPClient
 from .models import Finding
 from .parser import context_excerpt
-from .scoring import classify, score_candidate
+from .scoring import classify, has_case_correlation, score_candidate
 from .utils.time import utc_now
 from .utils.urls import filename_from_url, hostname_for, normalize_url
 
@@ -189,7 +189,7 @@ class CatalogBootstrapper:
             link_score = score_candidate(
                 self.config, normalized_link, title=record.title, fingerprints=self.database.pivot_map()
             )
-            if link_score.score > 0:
+            if has_case_correlation(link_score):
                 self.database.enqueue_url(
                     link, normalized_link, referrer_url=record.source_url, source=seed.source,
                     query="catalog bootstrap", depth=1, priority=link_score.score,

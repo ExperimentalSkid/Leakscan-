@@ -4,11 +4,21 @@ All notable changes to Leakscan are documented here.
 
 ## Unreleased
 
+- Counted and enforced provider budgets at the actual HTTP-request boundary, including pagination and manifest lookups.
+- Added bounded native pagination with focused/balanced/broad depths of one, three, and five result pages.
+- Added source-aware query capabilities so archives, news, sandboxes, exposure indexes, and repository catalogs receive useful query shapes instead of every global mutation.
+- Added metadata-only Internet Archive file manifests, Hugging Face repositories/files, Kaggle dataset files, GitHub release assets, and GitLab release/package files with file-level detection points.
+- Disabled the retired Bing Search API adapter and removed it from default discovery.
 - Replaced broad single-word archive-index fallbacks with full phrase, slug, URL, hash, or object-ID fingerprints.
-- Added a persistent 15-request strong-query budget per provider and made URLScan skip bare hash lookups.
+- Replaced the fixed 15-request cap with adaptive broad discovery: a 60-request balanced ceiling, a 45-request floor, plateau stopping, and focused/balanced/broad CLI profiles.
+- Moved every configured archive-extension mutation into the discovery floor while retaining provider-level equivalent-request deduplication.
 - Added immediate verification of newly unique candidates and suppressed duplicate `[FOUND]` console noise.
 - Canonicalized trailing-slash URL variants and added explicit listing/download-route states.
 - Added labelled ANY.RUN/Hybrid Analysis artifact pivots that remain distinct from payload hashes.
+- Separated labelled sandbox/analysis references from target candidates and rejected generic archive dependencies that have no case correlation.
+- Added Arquivo.pt full-text history, Internet Archive uploaded-item metadata, and GDELT global-news discovery without requiring API keys.
+- Added opt-in Mojeek, operator-configured SearXNG, Hybrid Analysis metadata-only search, and LeakIX public-exposure search providers.
+- Persisted provider reference provenance across resumes and exported provider-discovered news/analysis pages separately in `supporting_references.csv` so they cannot inflate target candidate counts.
 
 ## 1.1.0 - 2026-08-21
 

@@ -19,6 +19,22 @@ class ScoreResult:
     reasons: list[dict[str, Any]]
 
 
+NON_CORRELATING_REASONS = {"archive_reference", "case_exclusion_term"}
+
+
+def has_case_correlation(result: ScoreResult) -> bool:
+    """Return true only when evidence connects a URL to case fingerprints.
+
+    A generic archive extension is useful discovery metadata, but it is not a
+    target correlation by itself.
+    """
+    return any(
+        int(item.get("points", 0)) > 0
+        and item.get("reason", "") not in NON_CORRELATING_REASONS
+        for item in result.reasons
+    )
+
+
 def target_size_ranges(reported_sizes: str | list[str], tolerance: float) -> list[tuple[int, int]]:
     import re
 

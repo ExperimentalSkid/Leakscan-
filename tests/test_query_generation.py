@@ -38,14 +38,15 @@ def test_user_agent_renders_version_and_sanitized_contact(monkeypatch) -> None:
     assert "contact=security@example.testInjected: no" in rendered
 
 
-def test_first_provider_budget_contains_only_strong_queries(app_config) -> None:
+def test_discovery_floor_contains_identifiers_urls_and_all_extensions(app_config) -> None:
     queries = generate_queries(app_config)
-    first_budget = queries[: app_config.search.max_queries_per_provider]
+    discovery_floor = queries[: app_config.search.minimum_queries_before_plateau]
 
-    assert '"Example Dataset.7z"' in first_budget
-    assert '"abcDEF123"' in first_budget
-    assert f'"{app_config.case.primary_seed_url}"' in first_budget
-    assert not any(query.rsplit(" ", 1)[-1] in app_config.search.intent_terms for query in first_budget)
+    assert '"Example Dataset.7z"' in discovery_floor
+    assert '"abcDEF123"' in discovery_floor
+    assert f'"{app_config.case.primary_seed_url}"' in discovery_floor
+    for extension in app_config.safety.archive_extensions:
+        assert f'"Example Dataset{extension}"' in discovery_floor
 
 
 def test_artifact_hash_is_separate_from_payload_hash(app_config) -> None:

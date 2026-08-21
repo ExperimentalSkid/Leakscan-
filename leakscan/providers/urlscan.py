@@ -19,6 +19,7 @@ def escape_urlscan_query(value: str) -> str:
 
 class URLScanProvider(SearchProvider):
     name = "urlscan"
+    query_capabilities = frozenset({"filename", "identifier", "url", "phrase"})
 
     def request_key(self, query: str) -> str:
         if is_probable_hash(query):

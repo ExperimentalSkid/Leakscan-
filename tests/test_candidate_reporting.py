@@ -95,6 +95,7 @@ def test_host_verification_fields_and_takedown_state_are_exported() -> None:
         normalized_url="https://files.example/u/example",
         status_code=200,
         classification="TAKEN_DOWN",
+        score=100,
         last_checked="2026-01-02T00:00:00Z",
         verification_point={
             "method": "file_host_api",
@@ -118,6 +119,22 @@ def test_host_verification_fields_and_takedown_state_are_exported() -> None:
     assert summary["verified_filename"] == "Example Archive.7z"
     assert summary["verified_size_bytes"] == 123
     assert summary["verified_sha256"] == "a" * 64
+
+
+def test_unrelated_live_archive_is_not_a_target_candidate() -> None:
+    finding = Finding(
+        timestamp_utc="2026-01-02T00:00:00Z",
+        discovery_method="metadata_only_probe",
+        candidate_url="https://cdn.example/openh264-runtime.zip",
+        normalized_url="https://cdn.example/openh264-runtime.zip",
+        status_code=200,
+        classification="CONFIRMED_METADATA_ONLY",
+        score=20,
+        score_reasons=[{"points": 20, "reason": "archive_reference", "evidence": "zip"}],
+        last_checked="2026-01-02T00:00:00Z",
+    )
+
+    assert _candidate_summaries([finding], 50) == []
 
 
 def test_legacy_urlscan_observation_recovers_detection_record() -> None:

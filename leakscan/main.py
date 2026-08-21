@@ -20,6 +20,12 @@ from .verifier import verify_candidates
 
 LOG = logging.getLogger("leakscan")
 
+SEARCH_PROFILES = {
+    "focused": (15, 15, 5, 1),
+    "balanced": (60, 45, 10, 3),
+    "broad": (120, 60, 20, 5),
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     default_settings = Path(__file__).resolve().with_name("default_settings.yaml")
@@ -40,6 +46,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--per-host-delay", type=float)
     parser.add_argument("--retry-count", type=int)
     parser.add_argument("--provider", action="append", help="Provider name; repeat to select several")
+    parser.add_argument(
+        "--search-profile",
+        choices=tuple(SEARCH_PROFILES),
+        help="Discovery breadth: focused, balanced, or broad (overrides search request/plateau settings)",
+    )
+    parser.add_argument(
+        "--max-provider-requests",
+        type=int,
+        help="Maximum actual requests per provider across this case; 0 disables the ceiling",
+    )
+    parser.add_argument(
+        "--max-result-pages-per-query",
+        type=int,
+        help="Maximum native result pages traversed for one provider query",
+    )
     parser.add_argument("--resume", action="store_true", help="Continue from existing SQLite state")
     parser.add_argument("--dry-run", action="store_true", help="Generate the plan and case structure without network requests")
     parser.add_argument("--ignore-robots", action="store_true", help="Disable robots.txt checks")
@@ -64,6 +85,20 @@ def _apply_overrides(config, args) -> None:
         config.crawl.respect_robots_txt = False
     if args.allow_private_networks:
         config.safety.reject_private_networks = False
+    if args.search_profile:
+        maximum, minimum, stale, result_pages = SEARCH_PROFILES[args.search_profile]
+        config.search.max_queries_per_provider = maximum
+        config.search.minimum_queries_before_plateau = minimum
+        config.search.stop_after_stale_queries = stale
+        config.search.max_result_pages_per_query = result_pages
+    if args.max_provider_requests is not None:
+        if args.max_provider_requests < 0:
+            raise ValueError("--max-provider-requests must be zero or greater")
+        config.search.max_queries_per_provider = args.max_provider_requests
+    if args.max_result_pages_per_query is not None:
+        if args.max_result_pages_per_query < 1:
+            raise ValueError("--max-result-pages-per-query must be at least one")
+        config.search.max_result_pages_per_query = args.max_result_pages_per_query
 
 
 def _configure_logging(output: Path, verbose: bool) -> None:

@@ -25,6 +25,8 @@ htmlcov/
 **/findings.csv
 **/candidate_urls.csv
 **/detection_points.csv
+**/artifact_references.csv
+**/supporting_references.csv
 **/dead_links.csv
 **/domains.csv
 **/hashes.csv

@@ -10,6 +10,7 @@ from .base import SearchProvider, archive_index_pattern
 
 class ArchiveOrgProvider(SearchProvider):
     name = "archive_org"
+    query_capabilities = frozenset({"filename", "identifier", "phrase", "site", "url"})
 
     def _pattern(self, query: str) -> str:
         return archive_index_pattern(query, self.archive_extensions)

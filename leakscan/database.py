@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS url_queue (
     referrer_url TEXT,
     source TEXT,
     query_text TEXT,
+    reference_kind TEXT NOT NULL DEFAULT '',
     depth INTEGER NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -105,7 +106,18 @@ class CaseDatabase:
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
+        self._migrate_schema()
         self.connection.commit()
+
+    def _migrate_schema(self) -> None:
+        """Apply additive migrations needed by resumable databases."""
+        queue_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(url_queue)")
+        }
+        if "reference_kind" not in queue_columns:
+            self.connection.execute(
+                "ALTER TABLE url_queue ADD COLUMN reference_kind TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         self.connection.close()
@@ -137,6 +149,7 @@ class CaseDatabase:
         referrer_url: str = "",
         source: str = "",
         query: str = "",
+        reference_kind: str = "",
         depth: int = 0,
         priority: int = 0,
     ) -> bool:
@@ -145,9 +158,13 @@ class CaseDatabase:
         now = utc_now()
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO url_queue
-               (normalized_url, original_url, referrer_url, source, query_text, depth, priority, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (normalized_url, original_url, referrer_url, source, query, depth, priority, now, now),
+               (normalized_url, original_url, referrer_url, source, query_text, reference_kind,
+                depth, priority, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                normalized_url, original_url, referrer_url, source, query, reference_kind,
+                depth, priority, now, now,
+            ),
         )
         self.connection.commit()
         return cursor.rowcount > 0

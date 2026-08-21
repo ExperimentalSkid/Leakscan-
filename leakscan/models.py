@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, overload
 
 
 @dataclass(slots=True)
@@ -16,7 +17,32 @@ class SearchResult:
     published: str = ""
     source_url: str = ""
     record_id: str = ""
+    reference_kind: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class SearchBatch(Sequence[SearchResult]):
+    """One provider query result, including whether its configured traversal completed."""
+
+    results: list[SearchResult] = field(default_factory=list)
+    complete: bool = True
+    pages_fetched: int = 0
+
+    @overload
+    def __getitem__(self, index: int) -> SearchResult: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[SearchResult]: ...
+
+    def __getitem__(self, index: int | slice) -> SearchResult | list[SearchResult]:
+        return self.results[index]
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __iter__(self) -> Iterator[SearchResult]:
+        return iter(self.results)
 
 
 @dataclass(slots=True)

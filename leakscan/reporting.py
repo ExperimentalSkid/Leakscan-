@@ -15,6 +15,7 @@ from .config import AppConfig, generate_queries
 from .database import CaseDatabase
 from .models import Finding
 from .utils.time import utc_now
+from .utils.urls import normalize_url
 
 CSV_FIELDS = [
     "timestamp_utc", "source", "query", "discovery_method", "source_url", "candidate_url",
@@ -32,6 +33,16 @@ CANDIDATE_FIELDS = [
     "verification_method", "verification_url", "host_object_id", "verified_at",
     "verified_filename", "verified_size_bytes", "verified_sha256", "availability",
     "current_evidence_path", "sources", "referrer_url",
+]
+
+ARTIFACT_REFERENCE_FIELDS = [
+    "reference_url", "artifact_type", "current_status", "current_http_status",
+    "sources", "detection_query", "last_checked", "observation_count",
+]
+
+SUPPORTING_REFERENCE_FIELDS = [
+    "reference_url", "reference_type", "current_status", "current_http_status",
+    "sources", "detection_query", "last_checked", "observation_count",
 ]
 
 
@@ -96,9 +107,31 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     _write_csv(config.output_dir / "findings.csv", dictionaries, CSV_FIELDS)
 
-    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    artifact_report_types, artifact_hash_types = _artifact_maps(config)
+    candidates = _candidate_summaries(
+        findings,
+        config.scoring.likely_threshold,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    artifact_references = _artifact_reference_summaries(
+        findings,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    supporting_references = _supporting_reference_summaries(findings)
     _write_csv(config.output_dir / "candidate_urls.csv", candidates, CANDIDATE_FIELDS)
     _write_csv(config.output_dir / "detection_points.csv", candidates, CANDIDATE_FIELDS)
+    _write_csv(
+        config.output_dir / "artifact_references.csv",
+        artifact_references,
+        ARTIFACT_REFERENCE_FIELDS,
+    )
+    _write_csv(
+        config.output_dir / "supporting_references.csv",
+        supporting_references,
+        SUPPORTING_REFERENCE_FIELDS,
+    )
     domains = []
     for row in database.iter_domains():
         row["ip_addresses"] = row.pop("ip_addresses_json", "[]")
@@ -201,9 +234,71 @@ def _candidate_key(finding: Finding) -> str:
     return finding.normalized_url or finding.candidate_url or finding.final_url or finding.original_url
 
 
-def _candidate_summaries(findings: list[Finding], likely_threshold: int) -> list[dict[str, Any]]:
+def _artifact_maps(config: AppConfig) -> tuple[dict[str, str], dict[str, str]]:
+    report_types = {
+        normalize_url(artifact.report_url): artifact.artifact_type
+        for artifact in config.case.artifacts
+        if artifact.report_url
+    }
+    hash_types = {
+        item.get("value", "").casefold(): artifact.artifact_type
+        for artifact in config.case.artifacts
+        for item in artifact.hashes
+        if item.get("value")
+    }
+    return report_types, hash_types
+
+
+def _finding_artifact_type(
+    finding: Finding,
+    report_types: dict[str, str],
+    hash_types: dict[str, str],
+) -> str:
+    for value in (
+        finding.normalized_url,
+        finding.final_url,
+        finding.candidate_url,
+        finding.original_url,
+    ):
+        normalized = normalize_url(value) if value else ""
+        if normalized in report_types:
+            return report_types[normalized]
+
+    strong_target_reasons = {
+        "exact_item_id",
+        "exact_filename",
+        "filename_similarity_above_threshold",
+        "known_hash_match",
+    }
+    if any(item.get("reason") in strong_target_reasons for item in finding.score_reasons):
+        return ""
+    query = finding.query.casefold()
+    for digest, artifact_type in hash_types.items():
+        if digest and digest in query:
+            return f"{artifact_type}:derived_reference"
+    return ""
+
+
+def _finding_supporting_reference_type(finding: Finding) -> str:
+    prefix = "supporting_reference:"
+    return finding.relation[len(prefix):] if finding.relation.startswith(prefix) else ""
+
+
+def _candidate_summaries(
+    findings: list[Finding],
+    likely_threshold: int,
+    artifact_report_types: dict[str, str] | None = None,
+    artifact_hash_types: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    report_types = artifact_report_types or {}
+    hash_types = artifact_hash_types or {}
     grouped: dict[str, list[Finding]] = {}
     for finding in findings:
+        if (
+            _finding_artifact_type(finding, report_types, hash_types)
+            or _finding_supporting_reference_type(finding)
+        ):
+            continue
         key = _candidate_key(finding)
         if key:
             grouped.setdefault(key, []).append(finding)
@@ -211,15 +306,7 @@ def _candidate_summaries(findings: list[Finding], likely_threshold: int) -> list
     output: list[dict[str, Any]] = []
     for url, observations in grouped.items():
         maximum_score = max((item.score for item in observations), default=0)
-        relevant_status = any(
-            item.classification in {
-                "CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED", "TAKEN_DOWN",
-                "LISTING_LIVE", "DOWNLOAD_ROUTE_LIVE",
-                "DEAD", "BLOCKED", "UNVERIFIED", "LIKELY",
-            }
-            for item in observations
-        )
-        if maximum_score < likely_threshold and not relevant_status:
+        if maximum_score < likely_threshold:
             continue
         direct = [
             item for item in observations
@@ -265,6 +352,74 @@ def _candidate_summaries(findings: list[Finding], likely_threshold: int) -> list
             "referrer_url": current.referrer_url if current else detection.referrer_url,
         })
     return sorted(output, key=lambda item: (-int(item["maximum_score"]), item["candidate_url"]))
+
+
+def _artifact_reference_summaries(
+    findings: list[Finding],
+    report_types: dict[str, str],
+    hash_types: dict[str, str],
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[Finding]] = {
+        (url, artifact_type): [] for url, artifact_type in report_types.items()
+    }
+    for finding in findings:
+        artifact_type = _finding_artifact_type(finding, report_types, hash_types)
+        if not artifact_type:
+            continue
+        key = normalize_url(_candidate_key(finding))
+        if key:
+            grouped.setdefault((key, artifact_type), []).append(finding)
+
+    output: list[dict[str, Any]] = []
+    for (url, artifact_type), observations in grouped.items():
+        direct = [
+            item for item in observations
+            if item.discovery_method != "search_result" and (item.last_checked or item.status_code is not None)
+        ]
+        current = max(direct, key=lambda item: item.last_checked or item.timestamp_utc) if direct else None
+        indexed = any(item.discovery_method == "search_result" for item in observations)
+        detection = min(observations, key=lambda item: item.timestamp_utc or item.first_seen) if observations else None
+        output.append({
+            "reference_url": url,
+            "artifact_type": artifact_type,
+            "current_status": _current_candidate_status(current, indexed) if observations else "NOT_OBSERVED",
+            "current_http_status": current.status_code if current else "",
+            "sources": sorted({item.source for item in observations if item.source}),
+            "detection_query": detection.query if detection else "operator-supplied artifact report",
+            "last_checked": current.last_checked if current else "",
+            "observation_count": len(observations),
+        })
+    return sorted(output, key=lambda item: (item["artifact_type"], item["reference_url"]))
+
+
+def _supporting_reference_summaries(findings: list[Finding]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[Finding]] = {}
+    for finding in findings:
+        reference_type = _finding_supporting_reference_type(finding)
+        key = normalize_url(_candidate_key(finding))
+        if reference_type and key:
+            grouped.setdefault((key, reference_type), []).append(finding)
+
+    output: list[dict[str, Any]] = []
+    for (url, reference_type), observations in grouped.items():
+        direct = [
+            item for item in observations
+            if item.discovery_method != "search_result" and (item.last_checked or item.status_code is not None)
+        ]
+        current = max(direct, key=lambda item: item.last_checked or item.timestamp_utc) if direct else None
+        indexed = any(item.discovery_method == "search_result" for item in observations)
+        detection = min(observations, key=lambda item: item.timestamp_utc or item.first_seen)
+        output.append({
+            "reference_url": url,
+            "reference_type": reference_type,
+            "current_status": _current_candidate_status(current, indexed),
+            "current_http_status": current.status_code if current else "",
+            "sources": sorted({item.source for item in observations if item.source}),
+            "detection_query": detection.query,
+            "last_checked": current.last_checked if current else "",
+            "observation_count": len(observations),
+        })
+    return sorted(output, key=lambda item: (item["reference_type"], item["reference_url"]))
 
 
 def _legacy_detection_point(finding: Finding) -> dict[str, str]:
@@ -328,9 +483,41 @@ def _candidate_line(item: dict[str, Any]) -> str:
     )
 
 
+def _artifact_line(item: dict[str, Any]) -> str:
+    status = item["current_status"]
+    http_status = f"; HTTP {item['current_http_status']}" if item["current_http_status"] != "" else ""
+    checked = f"; checked `{item['last_checked']}`" if item["last_checked"] else ""
+    return (
+        f"- <{item['reference_url']}> — `{item['artifact_type']}`; "
+        f"status `{status}`{http_status}{checked}."
+    )
+
+
+def _supporting_reference_line(item: dict[str, Any]) -> str:
+    status = item["current_status"]
+    http_status = f"; HTTP {item['current_http_status']}" if item["current_http_status"] != "" else ""
+    checked = f"; checked `{item['last_checked']}`" if item["last_checked"] else ""
+    return (
+        f"- <{item['reference_url']}> — `{item['reference_type']}`; "
+        f"status `{status}`{http_status}{checked}."
+    )
+
+
 def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings: list[Finding]) -> None:
     case = config.case
-    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    artifact_report_types, artifact_hash_types = _artifact_maps(config)
+    candidates = _candidate_summaries(
+        findings,
+        config.scoring.likely_threshold,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    artifact_references = _artifact_reference_summaries(
+        findings,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    supporting_references = _supporting_reference_summaries(findings)
     classifications = Counter(item["current_status"] for item in candidates)
     providers = sorted({finding.source for finding in findings if finding.source})
     confirmed = [
@@ -385,7 +572,17 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         lines.extend(_candidate_line(item) for item in current_references)
     else:
         lines.append("No current HTML/reference page was directly observed.")
-    lines.extend(["", "## 7. Duplicate and mirror relationships", ""])
+    lines.extend(["", "## 7. Supporting artifact references", ""])
+    if artifact_references:
+        lines.extend(_artifact_line(item) for item in artifact_references)
+    else:
+        lines.append("No labelled sandbox or analysis artifact reference was recorded.")
+    lines.extend(["", "## 8. Provider-discovered supporting references", ""])
+    if supporting_references:
+        lines.extend(_supporting_reference_line(item) for item in supporting_references)
+    else:
+        lines.append("No provider-discovered supporting reference was recorded.")
+    lines.extend(["", "## 9. Duplicate and mirror relationships", ""])
     relationships = database.iter_relationships()
     if relationships:
         lines.extend(
@@ -394,28 +591,28 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         )
     else:
         lines.append("No duplicate or redirect relationship was recorded.")
-    lines.extend(["", "## 8. Domains involved", ""])
+    lines.extend(["", "## 10. Domains involved", ""])
     domains = database.iter_domains()
     lines.extend(
         f"- `{item['hostname']}` — {item['status']}; last checked {item['last_checked']}"
         for item in domains
     ) if domains else lines.append("No domain metadata was collected.")
-    lines.extend(["", "## 9. Hashes found", ""])
+    lines.extend(["", "## 11. Hashes found", ""])
     lines.extend(
         f"- `{algorithm.upper()}` `{value}` (see `hashes.csv` for provenance)"
         for algorithm, value in sorted(hashes)
     ) if hashes else lines.append("No cryptographic hash was extracted from a relevant page or host API.")
-    lines.extend(["", "## 10. Dead, historical, and taken-down references", ""])
+    lines.extend(["", "## 12. Dead, historical, and taken-down references", ""])
     lines.extend(_candidate_line(item) for item in dead) if dead else lines.append("No dead or historical reference was recorded.")
     lines.extend(_candidate_line(item) for item in taken_down)
     timeline = sorted((finding.timestamp_utc, _display_url(finding), finding.discovery_method) for finding in findings)
-    lines.extend(["", "## 11. Timeline", ""])
+    lines.extend(["", "## 13. Timeline", ""])
     lines.extend(f"- `{timestamp}` — `{method}` — {url}" for timestamp, url, method in timeline[:500]) if timeline else lines.append("No observations recorded.")
     lines.extend([
-        "", "## 12. Unresolved candidates", "",
+        "", "## 14. Unresolved candidates", "",
         f"Unresolved unique candidates: **{len(unresolved)}**. Review `candidate_urls.csv`, `detection_points.csv`, and preserved evidence paths for handoff.", "",
         *(_candidate_line(item) for item in unresolved), "",
-        "## 13. Limitations", "",
+        "## 15. Limitations", "",
         "Search coverage depends on public indexing, provider availability, API credentials, rate limits, robots directives, and configured crawl bounds. Third-party statements remain attributed claims. A metadata-only confirmation establishes only the observed HTTP response metadata at the recorded time; it does not validate archive contents or ownership.", "",
         "## Unique candidate status totals", "",
         *(f"- `{name}`: {count}" for name, count in sorted(classifications.items())), "",
@@ -425,7 +622,19 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
 
 
 def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: list[Finding]) -> None:
-    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    artifact_report_types, artifact_hash_types = _artifact_maps(config)
+    candidates = _candidate_summaries(
+        findings,
+        config.scoring.likely_threshold,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    artifact_references = _artifact_reference_summaries(
+        findings,
+        artifact_report_types,
+        artifact_hash_types,
+    )
+    supporting_references = _supporting_reference_summaries(findings)
     counts = Counter(item["current_status"] for item in candidates)
     provider_requests = database.stats().get("provider_requests", {})
     provider_request_total = sum(provider_requests.values())
@@ -439,6 +648,8 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
             f"**{len({item.domain for item in findings if item.domain})} domains**. "
             f"Provider search requests: **{provider_request_total}**; "
             f"Unique candidates: **{len(candidates)}**; "
+            f"supporting artifact references: **{len(artifact_references)}**; "
+            f"provider-discovered supporting references: **{len(supporting_references)}**; "
             f"live metadata-only files: **{counts['LIVE_METADATA_ONLY']}**; "
             f"live but restricted files: **{counts['LIVE_RESTRICTED']}**; "
             f"taken down: **{counts['TAKEN_DOWN']}**; "
@@ -451,6 +662,16 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
         "## Highest-scoring unique candidates and detection points", "",
     ]
     lines.extend(_candidate_line(item) for item in highest) if highest else lines.append("No candidates recorded.")
+    lines.extend(["", "## Supporting artifact references", ""])
+    if artifact_references:
+        lines.extend(_artifact_line(item) for item in artifact_references)
+    else:
+        lines.append("No labelled sandbox or analysis artifact reference was recorded.")
+    lines.extend(["", "## Provider-discovered supporting references", ""])
+    if supporting_references:
+        lines.extend(_supporting_reference_line(item) for item in supporting_references[:20])
+    else:
+        lines.append("No provider-discovered supporting reference was recorded.")
     lines.extend([
         "", "## Evidentiary cautions", "",
         "- Search-result snippets and third-party page claims are references, not independent confirmation.",
