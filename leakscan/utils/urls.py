@@ -30,6 +30,8 @@ def normalize_url(url: str, base_url: str = "") -> str:
     host = f"[{hostname}]" if ":" in hostname else hostname
     netloc = f"{host}:{port}" if port else host
     path = quote(unquote(parts.path or "/"), safe="/%:@!$&'()*+,;=-._~")
+    if path != "/":
+        path = path.rstrip("/")
     query_pairs = [
         (key, value)
         for key, value in parse_qsl(parts.query, keep_blank_values=True)

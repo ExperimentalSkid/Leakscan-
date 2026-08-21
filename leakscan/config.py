@@ -22,6 +22,17 @@ class SeedConfig:
 
 
 @dataclass(slots=True)
+class ArtifactReferenceConfig:
+    source: str
+    artifact_type: str
+    subject_url: str = ""
+    report_url: str = ""
+    observed_at: str = ""
+    hashes: list[dict[str, str]] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass(slots=True)
 class CaseConfig:
     name: str
     seeds: list[SeedConfig]
@@ -32,6 +43,7 @@ class CaseConfig:
     aliases: list[str] = field(default_factory=list)
     translated_descriptors: list[str] = field(default_factory=list)
     exclusion_terms: list[str] = field(default_factory=list)
+    artifacts: list[ArtifactReferenceConfig] = field(default_factory=list)
 
     @property
     def primary_seed_url(self) -> str:
@@ -58,7 +70,7 @@ class CrawlConfig:
 class SearchConfig:
     providers: list[str] = field(default_factory=list)
     results_per_query: int = 20
-    max_queries_per_provider: int = 80
+    max_queries_per_provider: int = 15
     max_pivot_rounds: int = 20
     max_pivots_per_round: int = 50
     provider_failure_threshold: int = 2
@@ -119,7 +131,8 @@ def load_config(
     with resolved_case.open("r", encoding="utf-8") as handle:
         raw_case = dict((yaml.safe_load(handle) or {}).get("case", {}))
     seeds = [SeedConfig(**item) for item in raw_case.pop("seeds", [])]
-    case = CaseConfig(seeds=seeds, **raw_case)
+    artifacts = [ArtifactReferenceConfig(**item) for item in raw_case.pop("artifacts", [])]
+    case = CaseConfig(seeds=seeds, artifacts=artifacts, **raw_case)
     if not case.seeds:
         raise ValueError("case file must define at least one public seed URL")
     if not (case.item_ids or case.filenames or case.distinctive_phrases):
@@ -175,6 +188,12 @@ def initial_fingerprints(case: CaseConfig) -> dict[str, set[str]]:
         "alias": {value for value in [*case.aliases, *case.translated_descriptors] if value},
         "exclusion": {value for value in case.exclusion_terms if value},
         "hash": set(),
+        "artifact_hash": {
+            item.get("value", "")
+            for artifact in case.artifacts
+            for item in artifact.hashes
+            if item.get("value")
+        },
         "account": set(),
         "domain": {(urlsplit(seed.url).hostname or "").lower() for seed in case.seeds},
     }
@@ -211,31 +230,50 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
     for kind, entries in (fingerprints or {}).items():
         values.setdefault(kind, set()).update(entry for entry in entries if entry)
     queries: list[str] = []
+    deferred_filename_variants: list[str] = []
+    deferred_intent_queries: list[str] = []
     for filename in sorted(values["filename"]):
-        for variant in filename_variants(filename, config.safety.archive_extensions):
+        variants = filename_variants(filename, config.safety.archive_extensions)
+        stem = variants[1] if len(variants) > 1 else Path(filename).stem
+        extension_variants = {stem + extension for extension in config.safety.archive_extensions}
+        strong_variants = [
+            variant
+            for variant in variants
+            if variant == filename or variant not in extension_variants
+        ]
+        for variant in strong_variants:
             queries.append(f'"{variant}"')
-        stem = Path(filename).stem
+        deferred_filename_variants.extend(
+            f'"{variant}"' for variant in variants if variant not in strong_variants
+        )
         for term in config.search.intent_terms:
-            queries.append(f'"{stem}" {term}')
+            deferred_intent_queries.append(f'"{stem}" {term}')
     for item_id in sorted(values["item_id"]):
         queries.append(f'"{item_id}"')
         for filename in sorted(values["filename"]):
             suffix = Path(filename).suffix.lstrip(".")
             if suffix:
                 queries.append(f'"{item_id}" "{suffix}"')
+    queries.extend(f'"{digest}"' for digest in sorted(values["hash"] | values["artifact_hash"]))
+    queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
+    queries.extend(
+        f'"{artifact.report_url}"'
+        for artifact in config.case.artifacts
+        if artifact.report_url
+    )
     for phrase in sorted(values["phrase"] | values["alias"]):
         queries.append(f'"{phrase}"')
         for term in config.search.intent_terms:
-            queries.append(f'"{phrase}" {term}')
+            deferred_intent_queries.append(f'"{phrase}" {term}')
+    queries.extend(f'"{account}"' for account in sorted(values["account"]))
+    for domain in sorted(values["domain"]):
+        queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))
     for size in sorted(values["size"]):
         anchors = sorted(values["alias"] | values["phrase"])
         if anchors:
             queries.extend(f'"{anchor}" "{size}"' for anchor in anchors[:5])
         else:
             queries.append(f'"{size}"')
-    queries.extend(f'"{digest}"' for digest in sorted(values["hash"]))
-    queries.extend(f'"{account}"' for account in sorted(values["account"]))
-    for domain in sorted(values["domain"]):
-        queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))
-    queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
+    queries.extend(deferred_filename_variants)
+    queries.extend(deferred_intent_queries)
     return list(dict.fromkeys(queries))

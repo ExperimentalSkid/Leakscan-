@@ -109,13 +109,33 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
         ["hostname", "parent_domain", "ip_addresses", "asn", "tls", "first_seen", "last_checked", "status", "error"],
     )
     hash_rows_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    confidence_rank = {"unresolved": 0, "contextual": 1, "host_metadata_verified": 2}
+    confidence_rank = {
+        "unresolved": 0,
+        "contextual": 1,
+        "artifact_report_observed": 1,
+        "operator_supplied_artifact": 2,
+        "host_metadata_verified": 3,
+    }
+    for artifact in config.case.artifacts:
+        source_url = artifact.report_url or artifact.subject_url
+        for item in artifact.hashes:
+            key = (item.get("algorithm", ""), item.get("value", "").casefold(), source_url)
+            hash_rows_by_key[key] = {
+                "algorithm": key[0],
+                "hash": key[1],
+                "source_url": key[2],
+                "confidence": "operator_supplied_artifact",
+                "artifact_type": artifact.artifact_type,
+                "observed_at": artifact.observed_at,
+            }
     for finding in findings:
         for item in finding.hashes:
             key = (item.get("algorithm", ""), item.get("value", ""), finding.final_url or finding.source_url)
             method = str(finding.verification_point.get("method", ""))
             confidence = (
-                "host_metadata_verified"
+                "artifact_report_observed"
+                if item.get("artifact_type")
+                else "host_metadata_verified"
                 if method.endswith("_api") and finding.classification in {
                     "CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED", "TAKEN_DOWN"
                 }
@@ -124,13 +144,18 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
             row = {
                 "algorithm": key[0], "hash": key[1], "source_url": key[2],
                 "confidence": confidence,
+                "artifact_type": item.get("artifact_type", ""),
                 "observed_at": finding.timestamp_utc,
             }
             existing = hash_rows_by_key.get(key)
             if existing is None or confidence_rank[confidence] > confidence_rank[existing["confidence"]]:
                 hash_rows_by_key[key] = row
     hash_rows = list(hash_rows_by_key.values())
-    _write_csv(config.output_dir / "hashes.csv", hash_rows, ["algorithm", "hash", "source_url", "confidence", "observed_at"])
+    _write_csv(
+        config.output_dir / "hashes.csv",
+        hash_rows,
+        ["algorithm", "hash", "artifact_type", "source_url", "confidence", "observed_at"],
+    )
 
     redirect_rows = []
     for finding in findings:
@@ -158,8 +183,13 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
     )
     _write_discovery_report(config, database, findings)
     _write_analyst_summary(config, database, findings)
+    query_records = database.iter_queries()
     (config.output_dir / "queries.txt").write_text(
-        "\n".join(generate_queries(config, database.pivot_map())) + "\n", encoding="utf-8"
+        "\n".join(
+            f"{item['provider']}\t{item['status']}\t{item['query_text']}"
+            for item in query_records
+        ) + ("\n" if query_records else ""),
+        encoding="utf-8",
     )
 
 
@@ -184,6 +214,7 @@ def _candidate_summaries(findings: list[Finding], likely_threshold: int) -> list
         relevant_status = any(
             item.classification in {
                 "CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED", "TAKEN_DOWN",
+                "LISTING_LIVE", "DOWNLOAD_ROUTE_LIVE",
                 "DEAD", "BLOCKED", "UNVERIFIED", "LIKELY",
             }
             for item in observations
@@ -266,6 +297,10 @@ def _current_candidate_status(current: Finding | None, has_index_reference: bool
         return "LIVE_RESTRICTED"
     if current.classification == "CONFIRMED_METADATA_ONLY":
         return "LIVE_METADATA_ONLY"
+    if current.classification == "LISTING_LIVE":
+        return "LISTING_LIVE"
+    if current.classification == "DOWNLOAD_ROUTE_LIVE":
+        return "DOWNLOAD_ROUTE_LIVE"
     if current.status_code is not None and 200 <= current.status_code < 400:
         return "CURRENT_REFERENCE_ONLY"
     return "UNKNOWN"
@@ -302,11 +337,20 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         item for item in candidates
         if item["current_status"] in {"LIVE_METADATA_ONLY", "LIVE_RESTRICTED"}
     ]
-    current_references = [item for item in candidates if item["current_status"] == "CURRENT_REFERENCE_ONLY"]
+    current_references = [
+        item for item in candidates
+        if item["current_status"] in {"CURRENT_REFERENCE_ONLY", "LISTING_LIVE", "DOWNLOAD_ROUTE_LIVE"}
+    ]
     unresolved = [item for item in candidates if item["current_status"] in {"UNVERIFIED", "UNKNOWN", "BLOCKED"}]
     dead = [item for item in candidates if item["current_status"] in {"DEAD", "HISTORICAL_DEAD"}]
     taken_down = [item for item in candidates if item["current_status"] == "TAKEN_DOWN"]
     hashes = {(item.get("algorithm", ""), item.get("value", "")) for finding in findings for item in finding.hashes}
+    hashes.update(
+        (item.get("algorithm", ""), item.get("value", ""))
+        for artifact in case.artifacts
+        for item in artifact.hashes
+    )
+    query_records = database.iter_queries()
     lines = [
         f"# Discovery report: {case.name}", "",
         f"Generated: `{utc_now()}`", "",
@@ -315,13 +359,21 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         f"- Reported filenames: {', '.join(f'`{value}`' for value in case.filenames) or 'Not supplied'}",
         f"- Reported sizes: {', '.join(f'`{value}`' for value in case.reported_sizes) or 'Not supplied'}",
         *(f"- Seed listing: <{seed.url}> (`{seed.adapter}` adapter)" for seed in case.seeds), "",
+        *(
+            f"- Labelled `{artifact.artifact_type}` reference: <{artifact.report_url}> "
+            f"(subject <{artifact.subject_url}>)"
+            for artifact in case.artifacts
+        ), "",
         "The target definition is operator-supplied seed information. It is not, by itself, proof that an archive is currently available.", "",
         "## 2. Methodology", "",
         "Independent search providers were queried with exact identifiers, filename mutations, descriptive fragments, and discovered hash pivots. Relevant public HTML/text pages were retrieved within configured bounds. Recognized file hosts were checked through public metadata APIs; other archive-like URLs used headers-only requests or bodyless range fallbacks.", "",
         "## 3. Search providers used", "",
         *(f"- `{provider}`" for provider in providers),
-        "", "## 4. Exact queries", "",
-        *(f"- `{query}`" for query in generate_queries(config, database.pivot_map())),
+        "", "## 4. Provider query records", "",
+        *(
+            f"- `{item['provider']}` `{item['status']}` — `{item['query_text']}`"
+            for item in query_records
+        ),
         "", "## 5. Confirmed public references and metadata-only archive candidates", "",
     ]
     if confirmed:
@@ -375,6 +427,8 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
 def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: list[Finding]) -> None:
     candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
     counts = Counter(item["current_status"] for item in candidates)
+    provider_requests = database.stats().get("provider_requests", {})
+    provider_request_total = sum(provider_requests.values())
     highest = candidates[:10]
     lines = [
         f"# Analyst summary: {config.case.name}", "",
@@ -383,11 +437,14 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
         (
             f"The run preserved **{len(findings)} observations** across "
             f"**{len({item.domain for item in findings if item.domain})} domains**. "
+            f"Provider search requests: **{provider_request_total}**; "
             f"Unique candidates: **{len(candidates)}**; "
             f"live metadata-only files: **{counts['LIVE_METADATA_ONLY']}**; "
             f"live but restricted files: **{counts['LIVE_RESTRICTED']}**; "
             f"taken down: **{counts['TAKEN_DOWN']}**; "
             f"current reference pages: **{counts['CURRENT_REFERENCE_ONLY']}**; "
+            f"live listing pages: **{counts['LISTING_LIVE']}**; "
+            f"responsive download routes with unverified payloads: **{counts['DOWNLOAD_ROUTE_LIVE']}**; "
             f"historical/dead: **{counts['HISTORICAL_DEAD'] + counts['DEAD']}**; "
             f"unverified/unknown/blocked: **{counts['UNVERIFIED'] + counts['UNKNOWN'] + counts['BLOCKED']}**."
         ), "",
@@ -401,6 +458,8 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
         "- `LIVE_RESTRICTED` means host-native metadata confirms the object but access is restricted.",
         "- `TAKEN_DOWN` means the host reports legal/abuse removal or returned HTTP 451.",
         "- `CURRENT_REFERENCE_ONLY` means a current HTML/reference page exists; it does not prove the archive payload is live.",
+        "- `LISTING_LIVE` means a host information/listing page responds; it does not prove the archive payload is live.",
+        "- `DOWNLOAD_ROUTE_LIVE` means a download-labelled HTML route responds, but no file metadata was established.",
         "- `HISTORICAL_DEAD` means an index detected the candidate but the latest direct check returned `404` or `410`.",
         "- Review timestamps, redirect chains, headers, and preserved page hashes before a takedown submission.", "",
     ])

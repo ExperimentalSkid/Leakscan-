@@ -12,7 +12,7 @@ The engine contains no organization-specific target logic. Identifiers, filename
 1. Visits configured public catalog or listing pages first.
 2. Extracts displayed IDs, filenames, sizes, hashes, dates, accounts, fields, and links.
 3. Expands the case fingerprint with newly observed identifiers.
-4. Searches independent public sources and recursively crawls relevant HTML or text pages.
+4. Searches independent public sources and immediately verifies each newly unique candidate before continuing.
 5. Repeats discovery when new fingerprints or domains are found.
 6. Verifies recognized file-host objects through public metadata APIs and checks other archive-like candidates from response metadata without retrieving archive bodies.
 7. Exports resumable SQLite state, JSONL/CSV evidence, saved pages, and a Markdown handoff report.
@@ -74,18 +74,28 @@ case:
   aliases: ["Example_Dataset"]
   translated_descriptors: []
   exclusion_terms: []
+  artifacts:
+    - source: public_sandbox
+      artifact_type: html_page_artifact
+      subject_url: "https://public-catalog.example/information/item-id"
+      report_url: "https://analysis.example/report/id"
+      observed_at: "2026-01-01T00:00:00Z"
+      hashes:
+        - algorithm: sha256
+          value: "page-artifact-hash"
+      notes: "Hash identifies the HTML/report artifact, not the target archive."
 ```
 
-`auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic.
+`auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic. Optional `artifacts` entries preserve known sandbox/report provenance and keep page, URL-shortcut, and related-analysis hashes separate from archive payload hashes.
 
 ## Discovery providers
 
 - No key required: DuckDuckGo HTML, Common Crawl, Internet Archive CDX, urlscan public API, and AlienVault OTX public indicator lookup.
 - Optional credentials: Brave, Bing, Google Programmable Search, GitHub, GitLab, urlscan, VirusTotal, and OTX.
 
-A provider error or rate limit is isolated and recorded without stopping other providers. The per-host delay applies to provider APIs as well as crawling. Authentication failures open an immediate circuit breaker; rate limits honor `Retry-After` and establish a persisted cooldown; repeated connection or service failures disable that provider for the remainder of the run. Equivalent provider requests are sent once even when several filename variants map to the same API lookup.
+A provider error or rate limit is isolated and recorded without stopping other providers. The per-host delay applies to provider APIs as well as crawling. Authentication failures open an immediate circuit breaker; rate limits honor `Retry-After` and establish a persisted cooldown; repeated connection or service failures disable that provider for the remainder of the run. Equivalent provider requests are sent once even when several filename variants map to the same API lookup. The default persistent case budget is 15 actual requests per provider across pivot rounds and resumes; raise `search.max_queries_per_provider` explicitly when broader expansion is justified.
 
-Search filtering is controlled by `search.safe_search` in the bundled defaults or a custom settings file; the default requests unfiltered results from providers that support that option. Leakscan searches the exact supplied filename first, then every archive extension configured under `safety.archive_extensions`.
+Search filtering is controlled by `search.safe_search` in the bundled defaults or a custom settings file; the default requests unfiltered results from providers that support that option. Leakscan prioritizes the exact filename, filename slugs, object IDs, labelled hashes, known URLs, and distinctive phrases. Extension permutations and intent terms remain available later in the generated plan but do not displace stronger fingerprints from the default provider budget. URLScan skips bare hash searches because its selected fields cover URLs and page titles rather than file metadata.
 
 URLScan queries escape its reserved query-string characters and use the provider's remaining/reset headers to pause before another request would exceed quota. Compound and split archives such as `.tar.gz`, `.7z.001`, and `.part01.rar` are configurable alongside ordinary archive suffixes.
 
@@ -101,10 +111,14 @@ SQLite stores pending and visited URLs, provider queries, extracted pivots, rela
 
 `candidate_urls.csv` contains one authoritative row per canonical candidate URL. `detection_points.csv` records where each candidate was first detected and how it was most recently verified: provider, exact query, provider record URL and ID, provider timestamp, verification method and endpoint, host object ID, verified filename/size/SHA-256, and local timestamps. Current direct observations override historical index records.
 
+Fragments and non-root trailing slashes are removed for candidate deduplication. Console output uses `[NEW]` only for the first canonical URL; repeated provider records are retained as evidence but summarized as duplicate observations. `hashes.csv` includes an `artifact_type` column so sandbox HTML and URL-shortcut hashes cannot silently become payload hashes.
+
 - `LIVE_METADATA_ONLY`: current file-like metadata was verified without retrieving the file body.
 - `LIVE_RESTRICTED`: host-native metadata confirms the object, but access is restricted.
 - `TAKEN_DOWN`: the host reports legal/abuse removal or returned HTTP 451.
 - `HISTORICAL_DEAD`: an index recorded the candidate and its current direct check is 404/410.
+- `LISTING_LIVE`: a host information/listing page responds, without proving the archive is live.
+- `DOWNLOAD_ROUTE_LIVE`: a download-labelled HTML route responds, but no file metadata was established.
 - `CURRENT_REFERENCE_ONLY`, `UNVERIFIED`, and `BLOCKED`: never claims that a live file was confirmed.
 
 Pixeldrain `/u/{id}` candidates are verified through the documented `/api/file/{id}/info` endpoint. Leakscan preserves stable object metadata while reading no archive bytes. Other hosts continue to use bodyless `HEAD` or one-byte range probes.

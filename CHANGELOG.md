@@ -5,6 +5,10 @@ All notable changes to Leakscan are documented here.
 ## Unreleased
 
 - Replaced broad single-word archive-index fallbacks with full phrase, slug, URL, hash, or object-ID fingerprints.
+- Added a persistent 15-request strong-query budget per provider and made URLScan skip bare hash lookups.
+- Added immediate verification of newly unique candidates and suppressed duplicate `[FOUND]` console noise.
+- Canonicalized trailing-slash URL variants and added explicit listing/download-route states.
+- Added labelled ANY.RUN/Hybrid Analysis artifact pivots that remain distinct from payload hashes.
 
 ## 1.1.0 - 2026-08-21
 

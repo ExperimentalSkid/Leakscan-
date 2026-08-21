@@ -66,6 +66,27 @@ def test_only_verified_file_metadata_is_called_live() -> None:
     assert _candidate_summaries([verified_file], 50)[0]["current_status"] == "LIVE_METADATA_ONLY"
 
 
+def test_listing_and_download_routes_have_precise_non_file_states() -> None:
+    listing = Finding(
+        timestamp_utc="2026-01-02T00:00:00Z",
+        discovery_method="recursive_html_fetch",
+        candidate_url="https://catalog.example/Information/example",
+        normalized_url="https://catalog.example/Information/example",
+        status_code=200,
+        classification="LISTING_LIVE",
+        score=100,
+        last_checked="2026-01-02T00:00:00Z",
+    )
+    download = Finding.from_dict(listing.to_dict())
+    download.candidate_url = "https://catalog.example/Download/example"
+    download.normalized_url = download.candidate_url
+    download.classification = "DOWNLOAD_ROUTE_LIVE"
+
+    summaries = _candidate_summaries([listing, download], 50)
+
+    assert {item["current_status"] for item in summaries} == {"LISTING_LIVE", "DOWNLOAD_ROUTE_LIVE"}
+
+
 def test_host_verification_fields_and_takedown_state_are_exported() -> None:
     finding = Finding(
         timestamp_utc="2026-01-02T00:00:00Z",

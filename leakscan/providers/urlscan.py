@@ -7,7 +7,7 @@ import os
 import httpx
 
 from ..models import SearchResult
-from .base import SearchProvider
+from .base import SearchProvider, is_probable_hash
 
 URLSCAN_RESERVED = set(r'+-=><!(){}[]^"~*?:\\/')
 
@@ -21,6 +21,8 @@ class URLScanProvider(SearchProvider):
     name = "urlscan"
 
     def request_key(self, query: str) -> str:
+        if is_probable_hash(query):
+            return ""
         return query.replace('"', "").strip().casefold()
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:

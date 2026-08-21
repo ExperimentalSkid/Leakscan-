@@ -7,6 +7,7 @@ import pytest
 
 from leakscan.database import CaseDatabase
 from leakscan.http import HostRateLimiter
+from leakscan.models import SearchResult
 from leakscan.providers.archive_org import ArchiveOrgProvider
 from leakscan.providers.base import ProviderUnavailable, SearchProvider
 from leakscan.providers.commoncrawl import CommonCrawlProvider
@@ -123,12 +124,12 @@ def test_archive_index_skips_weak_single_word_fallback(provider: SearchProvider)
 
 @pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
 def test_archive_index_preserves_object_identifier(provider: SearchProvider) -> None:
-    assert provider.request_key('"f6UKALOfa0GZmo"') == "*f6ukalofa0gzmo*"
+    assert provider.request_key('"Ab12Cd34Ef56Gh"') == "*ab12cd34ef56gh*"
 
 
 @pytest.mark.parametrize("provider", [ArchiveOrgProvider(), CommonCrawlProvider()])
 def test_archive_index_extracts_identifier_from_site_query(provider: SearchProvider) -> None:
-    assert provider.request_key("site:example.test f6UKALOfa0GZmo") == "*f6ukalofa0gzmo*"
+    assert provider.request_key("site:example.test Ab12Cd34Ef56Gh") == "*ab12cd34ef56gh*"
 
 
 @pytest.mark.asyncio
@@ -186,3 +187,67 @@ async def test_successful_final_quota_request_opens_persisted_cooldown(app_confi
         assert database.get_provider_state("fake", "cooldown") is not None
     finally:
         database.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_request_budget_persists_across_pivot_rounds(app_config) -> None:
+    app_config.search.max_queries_per_provider = 2
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    provider = FakeProvider(lambda _query: [])
+    engine = SearchEngine(app_config, database)
+    engine.providers = {"fake": provider}
+    try:
+        await engine.run(["one:first", "two:second", "three:third"], ["fake"])
+        await engine.run(["one:first", "two:second", "three:third", "four:fourth"], ["fake"])
+
+        assert provider.calls == 2
+        assert database.provider_request_count("fake") == 2
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_provider_records_enqueue_one_canonical_url(app_config) -> None:
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    provider = FakeProvider(lambda _query: [
+        SearchResult(url="https://files.example/item/abc/", provider="fake"),
+        SearchResult(url="https://files.example/item/abc", provider="fake"),
+    ])
+    engine = SearchEngine(app_config, database)
+    engine.providers = {"fake": provider}
+    try:
+        await engine.run(["one:first"], ["fake"])
+
+        assert database.queue_counts() == {"pending": 1}
+        assert len(list(database.iter_findings())) == 2
+    finally:
+        database.close()
+
+
+@pytest.mark.asyncio
+async def test_new_candidate_is_processed_before_search_continues(app_config, monkeypatch) -> None:
+    calls: list[int] = []
+
+    async def fake_run_pending(crawler, _http) -> int:
+        calls.append(crawler.database.queue_counts().get("pending", 0))
+        return 0
+
+    monkeypatch.setattr("leakscan.search.Crawler.run_pending", fake_run_pending)
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    provider = FakeProvider(lambda _query: [
+        SearchResult(url="https://files.example/item/new", provider="fake")
+    ])
+    engine = SearchEngine(app_config, database)
+    engine.providers = {"fake": provider}
+    try:
+        await engine.run(["one:first"], ["fake"], verify_immediately=True)
+
+        assert calls == [1]
+    finally:
+        database.close()
+
+
+def test_urlscan_skips_bare_hash_queries() -> None:
+    provider = URLScanProvider()
+
+    assert provider.request_key(f'"{"a" * 64}"') == ""

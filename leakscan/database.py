@@ -221,6 +221,15 @@ class CaseDatabase:
         )
         self.connection.commit()
 
+    def iter_queries(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """SELECT provider, query_text, status, result_count, last_error, updated_at
+                   FROM queries ORDER BY provider, updated_at, query_text"""
+            )
+        ]
+
     def get_provider_state(self, provider: str, state_key: str) -> Any | None:
         row = self.connection.execute(
             "SELECT value_json FROM provider_state WHERE provider=? AND state_key=?",
@@ -244,6 +253,15 @@ class CaseDatabase:
             (provider, state_key),
         )
         self.connection.commit()
+
+    def provider_request_count(self, provider: str) -> int:
+        value = self.get_provider_state(provider, "requests_sent")
+        return int(value.get("count", 0)) if isinstance(value, dict) else 0
+
+    def increment_provider_request_count(self, provider: str) -> int:
+        count = self.provider_request_count(provider) + 1
+        self.set_provider_state(provider, "requests_sent", {"count": count})
+        return count
 
     def add_pivot(self, pivot_type: str, value: str, source_url: str, confidence: str) -> bool:
         cursor = self.connection.execute(
@@ -310,10 +328,17 @@ class CaseDatabase:
         return [dict(row) for row in self.connection.execute("SELECT * FROM domain_observations ORDER BY hostname")]
 
     def stats(self) -> dict[str, Any]:
+        provider_requests = {
+            row["provider"]: int(json.loads(row["value_json"]).get("count", 0))
+            for row in self.connection.execute(
+                "SELECT provider, value_json FROM provider_state WHERE state_key='requests_sent'"
+            )
+        }
         return {
             "findings": self.connection.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
             "queries": self.connection.execute("SELECT COUNT(*) FROM queries").fetchone()[0],
             "pivots": self.connection.execute("SELECT COUNT(*) FROM pivots").fetchone()[0],
             "relationships": self.connection.execute("SELECT COUNT(*) FROM relationships").fetchone()[0],
+            "provider_requests": provider_requests,
             "queue": self.queue_counts(),
         }

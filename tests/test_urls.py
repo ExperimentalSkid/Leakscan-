@@ -10,6 +10,10 @@ def test_url_normalization_resolves_relative_url():
     assert normalize_url("../file.7z", "https://example.com/a/page") == "https://example.com/file.7z"
 
 
+def test_url_normalization_collapses_trailing_slash_variants():
+    assert normalize_url("https://example.com/item/abc/") == "https://example.com/item/abc"
+
+
 def test_archive_detection_uses_path_not_query():
     assert looks_like_archive_url("https://example.com/files/sample.7z?download=1", [".7z"])
     assert not looks_like_archive_url("https://example.com/page?name=sample.7z", [".7z"])

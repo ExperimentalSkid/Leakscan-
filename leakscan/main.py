@@ -144,7 +144,11 @@ async def _execute(args) -> int:
         elif args.command == "all":
             await CatalogBootstrapper(config, database).run()
             search = SearchEngine(config, database)
-            await search.run(generate_queries(config, database.pivot_map()), selected_providers)
+            await search.run(
+                generate_queries(config, database.pivot_map()),
+                selected_providers,
+                verify_immediately=True,
+            )
             _mark_current_pivots_searched(database)
             await Crawler(config, database).run()
             rounds = 0
@@ -152,11 +156,15 @@ async def _execute(args) -> int:
                 pivots = database.pending_pivots()[: config.search.max_pivots_per_round]
                 if not pivots:
                     break
-                await search.run(generate_queries(config, database.pivot_map()), selected_providers)
+                await search.run(
+                    generate_queries(config, database.pivot_map()),
+                    selected_providers,
+                    verify_immediately=True,
+                )
                 _mark_current_pivots_searched(database)
                 await Crawler(config, database).run()
                 rounds += 1
-            await verify_candidates(config, database)
+            await verify_candidates(config, database, skip_checked=True)
             export_reports(config, database)
         write_manifest(config, args.command, selected_providers, False, availability, database)
         LOG.info("[DONE] %s", database.stats())

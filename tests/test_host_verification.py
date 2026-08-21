@@ -6,6 +6,7 @@ from leakscan.database import CaseDatabase
 from leakscan.host_verifiers import (
     host_metadata_classification,
     host_verification_request,
+    reference_route_classification,
 )
 from leakscan.http import SafeHTTPClient
 from leakscan.reporting import _candidate_summaries
@@ -99,3 +100,15 @@ def test_host_metadata_distinguishes_dead_restricted_and_taken_down(
     expected: str,
 ) -> None:
     assert host_metadata_classification("pixeldrain", status_code, metadata) == expected
+
+
+def test_biteblob_html_routes_do_not_claim_a_live_file() -> None:
+    assert reference_route_classification(
+        "https://biteblob.com/Information/object-id", 200, "text/html; charset=utf-8"
+    ) == "LISTING_LIVE"
+    assert reference_route_classification(
+        "https://biteblob.com/Download/object-id/", 200, "text/html"
+    ) == "DOWNLOAD_ROUTE_LIVE"
+    assert reference_route_classification(
+        "https://biteblob.com/Download/object-id", 200, "application/octet-stream"
+    ) == ""

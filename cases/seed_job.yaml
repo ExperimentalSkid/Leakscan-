@@ -19,3 +19,34 @@ case:
     - Caisse Nationale de Securite Sociale Maroc
   translated_descriptors: []
   exclusion_terms: []
+  artifacts:
+    - source: hybrid_analysis
+      artifact_type: url_shortcut_artifact
+      subject_url: "https://biteblob.com/Download/f6UKALOfa0GZmo/#CNSS%20-%20Moroccan%20National%20Social%20Security%20Fund.7z"
+      report_url: "https://hybrid-analysis.com/sample/eeb35669adbadb53b87fb771b920791370c40c57963c804702d9ef7f058f0437/67f684a01a44f46fde0a76aa"
+      observed_at: "2025-04-09T14:30:56Z"
+      hashes:
+        - algorithm: sha256
+          value: eeb35669adbadb53b87fb771b920791370c40c57963c804702d9ef7f058f0437
+      notes: "Hash belongs to the submitted URL/shortcut artifact, not the archive payload."
+    - source: any_run
+      artifact_type: html_page_artifact
+      subject_url: "https://biteblob.com/Information/f6UKALOfa0GZmo"
+      report_url: "https://any.run/report/93fd8fd8aa0031e24f376285601c09dffe7a0e177b80fbafc4edbab2579ac4b8/abc3efee-b1a6-49ff-929f-82bfaee61076"
+      observed_at: "2025-04-10T13:07:10Z"
+      hashes:
+        - algorithm: sha256
+          value: 93fd8fd8aa0031e24f376285601c09dffe7a0e177b80fbafc4edbab2579ac4b8
+        - algorithm: sha1
+          value: 16748a5a9414eafa7c272de07b7f924044426408
+        - algorithm: md5
+          value: 6b728defd4ac27f89d785a5ab8bf8853
+      notes: "Hashes belong to the BiteBlob HTML page, not the archive payload."
+    - source: hybrid_analysis
+      artifact_type: related_analysis_artifact
+      subject_url: "https://biteblob.com/Download/f6UKALOfa0GZmo/"
+      report_url: "https://hybrid-analysis.com/sample/1360212e053f0c7cfad357be61c1e591e4b35842c020279f08b3590705cc1321"
+      hashes:
+        - algorithm: sha256
+          value: 1360212e053f0c7cfad357be61c1e591e4b35842c020279f08b3590705cc1321
+      notes: "Related Hybrid Analysis hash; not established as the archive payload hash."

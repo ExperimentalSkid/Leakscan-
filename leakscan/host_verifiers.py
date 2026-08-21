@@ -35,6 +35,9 @@ PIXELDRAIN_METADATA_FIELDS = (
     "message",
     "extra",
 )
+BITEBLOB_HOSTS = {"biteblob.com", "www.biteblob.com"}
+BITEBLOB_INFORMATION_PATH = re.compile(r"^/Information/[^/?#]+/?$", re.IGNORECASE)
+BITEBLOB_DOWNLOAD_PATH = re.compile(r"^/Download/[^/?#]+/?$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,3 +90,18 @@ def host_metadata_classification(provider: str, status_code: int | None, metadat
             return "LIVE_RESTRICTED"
         return "CONFIRMED_METADATA_ONLY"
     return "UNKNOWN"
+
+
+def reference_route_classification(url: str, status_code: int | None, content_type: str) -> str:
+    """Classify responsive host routes without implying that an archive payload is live."""
+    if status_code is None or not 200 <= status_code < 400 or "html" not in content_type.casefold():
+        return ""
+    parts = urlsplit(url)
+    hostname = (parts.hostname or "").casefold()
+    if hostname not in BITEBLOB_HOSTS:
+        return ""
+    if BITEBLOB_INFORMATION_PATH.match(parts.path):
+        return "LISTING_LIVE"
+    if BITEBLOB_DOWNLOAD_PATH.match(parts.path):
+        return "DOWNLOAD_ROUTE_LIVE"
+    return ""

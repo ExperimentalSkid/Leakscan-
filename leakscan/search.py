@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import logging
+from contextlib import AsyncExitStack
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
 
 import httpx
 
 from .config import AppConfig
+from .crawler import Crawler
 from .database import CaseDatabase
-from .http import HostRateLimiter
+from .http import HostRateLimiter, SafeHTTPClient
 from .models import Finding
 from .providers import build_providers
 from .providers.base import ProviderUnavailable
@@ -27,16 +29,29 @@ class SearchEngine:
         self.database = database
         self.providers = build_providers()
 
-    async def run(self, queries: list[str], provider_names: list[str] | None = None) -> int:
+    async def run(
+        self,
+        queries: list[str],
+        provider_names: list[str] | None = None,
+        *,
+        verify_immediately: bool = False,
+    ) -> int:
         names = provider_names or self.config.search.providers
         total = 0
         rate_limiter = HostRateLimiter(self.config.crawl.per_host_delay_seconds)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(self.config.crawl.timeout_seconds),
-            follow_redirects=True,
-            headers={"User-Agent": self.config.crawl.user_agent},
-            event_hooks={"request": [rate_limiter.on_request]},
-        ) as client:
+        crawler = Crawler(self.config, self.database) if verify_immediately else None
+        async with AsyncExitStack() as stack:
+            client = await stack.enter_async_context(httpx.AsyncClient(
+                timeout=httpx.Timeout(self.config.crawl.timeout_seconds),
+                follow_redirects=True,
+                headers={"User-Agent": self.config.crawl.user_agent},
+                event_hooks={"request": [rate_limiter.on_request]},
+            ))
+            verifier_http = (
+                await stack.enter_async_context(SafeHTTPClient(self.config))
+                if verify_immediately
+                else None
+            )
             for name in names:
                 provider = self.providers.get(name)
                 if provider is None:
@@ -59,24 +74,40 @@ class SearchEngine:
                     continue
                 if cooldown:
                     self.database.clear_provider_state(name, "cooldown")
+                request_budget = self.config.search.max_queries_per_provider
+                requests_used = self.database.provider_request_count(name)
+                requests_remaining = max(0, request_budget - requests_used) if request_budget > 0 else None
+                if requests_remaining == 0:
+                    LOG.info("[SKIP:%s] provider request budget exhausted (%s)", name, request_budget)
+                    continue
                 unfinished = [query for query in queries if self.database.query_status(name, query) != "done"]
                 request_groups: dict[str, list[str]] = {}
                 for query in unfinished:
                     request_key = provider.request_key(query)
                     if not request_key:
-                        self.database.finish_query(name, query, 0)
                         continue
                     request_groups.setdefault(request_key, []).append(query)
                 grouped_queries = list(request_groups.values())
-                if self.config.search.max_queries_per_provider > 0:
-                    grouped_queries = grouped_queries[: self.config.search.max_queries_per_provider]
+                if requests_remaining is not None:
+                    grouped_queries = grouped_queries[:requests_remaining]
+                if grouped_queries:
+                    LOG.info(
+                        "[PLAN:%s] request_groups=%s persistent_budget=%s used=%s",
+                        name,
+                        len(grouped_queries),
+                        request_budget if request_budget > 0 else "unlimited",
+                        requests_used,
+                    )
                 consecutive_failures = 0
-                for equivalent_queries in grouped_queries:
+                provider_new = 0
+                provider_duplicates = 0
+                for request_number, equivalent_queries in enumerate(grouped_queries, start=1):
                     query = equivalent_queries[0]
                     for equivalent in equivalent_queries:
                         self.database.add_query(name, equivalent)
-                    LOG.info('[SEARCH:%s] %s', name, query)
+                    LOG.info('[SEARCH:%s %s/%s] %s', name, request_number, len(grouped_queries), query)
                     try:
+                        self.database.increment_provider_request_count(name)
                         results = await provider.search(client, query, self.config.search.results_per_query)
                     except Exception as exc:  # noqa: BLE001 - circuit breaker isolates provider failures.
                         error = f"{type(exc).__name__}: {exc}"
@@ -110,6 +141,7 @@ class SearchEngine:
                         continue
                     consecutive_failures = 0
                     count = 0
+                    newly_enqueued = 0
                     for result in results:
                         normalized = normalize_url(result.url)
                         if not normalized:
@@ -146,14 +178,23 @@ class SearchEngine:
                             detection_point=detection_point,
                         )
                         self.database.record_finding(finding)
-                        self.database.enqueue_url(
+                        added = self.database.enqueue_url(
                             result.url, normalized, source=name, query=query, depth=0, priority=score.score
                         )
-                        LOG.info("[FOUND] %s score=%s", normalized, score.score)
+                        if added:
+                            newly_enqueued += 1
+                            provider_new += 1
+                            LOG.info("[NEW] %s score=%s", normalized, score.score)
+                        else:
+                            provider_duplicates += 1
+                            LOG.debug("[SEEN] duplicate provider observation %s", normalized)
                         count += 1
                     for equivalent in equivalent_queries:
                         self.database.finish_query(name, equivalent, count)
                     total += count
+                    if newly_enqueued and crawler is not None and verifier_http is not None:
+                        LOG.info("[VERIFY-NOW] processing %s newly unique candidate(s)", newly_enqueued)
+                        await crawler.run_pending(verifier_http)
                     cooldown_seconds = provider.consume_rate_limit_cooldown()
                     if cooldown_seconds is not None:
                         seconds = cooldown_seconds or self.config.search.provider_rate_limit_cooldown_seconds
@@ -168,6 +209,13 @@ class SearchEngine:
                             seconds,
                         )
                         break
+                if provider_new or provider_duplicates:
+                    LOG.info(
+                        "[OBSERVATIONS:%s] new=%s duplicate_records=%s",
+                        name,
+                        provider_new,
+                        provider_duplicates,
+                    )
         return total
 
 

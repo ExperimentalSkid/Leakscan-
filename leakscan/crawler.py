@@ -12,7 +12,11 @@ from urllib.parse import urlsplit
 from .config import AppConfig
 from .database import CaseDatabase
 from .domains import inspect_domain, parent_domain
-from .host_verifiers import host_metadata_classification
+from .host_verifiers import (
+    host_metadata_classification,
+    host_verification_request,
+    reference_route_classification,
+)
 from .http import SafeHTTPClient
 from .models import FetchResult, Finding
 from .parser import context_excerpt, parse_page
@@ -41,18 +45,34 @@ class Crawler:
         self._size_ranges = target_size_ranges(
             config.case.reported_sizes, config.scoring.size_tolerance_fraction
         )
+        self._artifact_hash_types = {
+            item.get("value", "").casefold(): artifact.artifact_type
+            for artifact in config.case.artifacts
+            for item in artifact.hashes
+            if item.get("value")
+        }
+        self._artifact_report_types = {
+            normalize_url(artifact.report_url): artifact.artifact_type
+            for artifact in config.case.artifacts
+            if artifact.report_url
+        }
 
     async def run(self) -> int:
         self.database.reset_active()
-        processed = 0
         async with SafeHTTPClient(self.config) as http:
-            while self.database.visited_count() < self.config.crawl.max_pages:
-                remaining = self.config.crawl.max_pages - self.database.visited_count()
-                batch = self.database.claim_pending(min(self.config.crawl.concurrency, remaining))
-                if not batch:
-                    break
-                await asyncio.gather(*(self._process(item, http) for item in batch))
-                processed += len(batch)
+            return await self.run_pending(http)
+
+    async def run_pending(self, http: SafeHTTPClient) -> int:
+        """Drain the current queue, including links discovered while processing it."""
+        self.database.reset_active()
+        processed = 0
+        while self.database.visited_count() < self.config.crawl.max_pages:
+            remaining = self.config.crawl.max_pages - self.database.visited_count()
+            batch = self.database.claim_pending(min(self.config.crawl.concurrency, remaining))
+            if not batch:
+                break
+            await asyncio.gather(*(self._process(item, http) for item in batch))
+            processed += len(batch)
         return processed
 
     async def _process(self, item: dict, http: SafeHTTPClient) -> None:
@@ -66,7 +86,10 @@ class Crawler:
             self.database.mark_url(url, "blocked", "maximum pages per domain exceeded")
             return
         LOG.info("[CRAWL] %s", url)
-        fetch = await http.fetch_page(url)
+        metadata_first = bool(host_verification_request(url)) or looks_like_archive_url(
+            url, self.config.safety.archive_extensions
+        )
+        fetch = await http.probe_metadata(url) if metadata_first else await http.fetch_page(url)
         if host and host not in self._inspected_domains:
             self._inspected_domains.add(host)
             await self._record_domain(url)
@@ -159,8 +182,11 @@ class Crawler:
             classification = host_metadata_classification(provider, fetch.status_code, host_metadata)
         else:
             blocked = fetch.status_code in {401, 403, 429}
-            classification = classify(
-                scored.score, self.config, fetch.status_code, blocked=blocked,
+            classification = reference_route_classification(final_url, fetch.status_code, content_type) or classify(
+                scored.score,
+                self.config,
+                fetch.status_code,
+                blocked=blocked,
                 metadata_archive_confirmed=confirmed,
             )
         verification = {
@@ -203,6 +229,22 @@ class Crawler:
     async def _record_page_finding(self, item: dict, fetch: FetchResult, depth: int) -> None:
         final_url = fetch.final_url or item["normalized_url"]
         parsed = parse_page(fetch.body, final_url, fetch.headers.get("content-type", ""))
+        report_artifact_type = self._artifact_report_types.get(normalize_url(final_url), "")
+        parsed_hashes = [
+            {
+                **item,
+                **(
+                    {"artifact_type": self._artifact_hash_types[item.get("value", "").casefold()]}
+                    if item.get("value", "").casefold() in self._artifact_hash_types
+                    else (
+                        {"artifact_type": f"{report_artifact_type}:unattributed_report_hash"}
+                        if report_artifact_type
+                        else {}
+                    )
+                ),
+            }
+            for item in parsed.hashes
+        ]
         size_values = set(self.config.case.reported_sizes) | self.database.pivot_map().get("size", set())
         current_size_ranges = target_size_ranges(list(size_values), self.config.scoring.size_tolerance_fraction)
         matching_size = next(
@@ -226,7 +268,7 @@ class Crawler:
         scored = score_candidate(
             self.config, final_url, title=parsed.title, context=excerpt, filename=filename,
             size_bytes=matching_size.get("bytes") if matching_size else None,
-            content_type=fetch.headers.get("content-type", ""), hashes=parsed.hashes,
+            content_type=fetch.headers.get("content-type", ""), hashes=parsed_hashes,
             fingerprints=self.database.pivot_map(),
         )
         now = utc_now()
@@ -251,7 +293,7 @@ class Crawler:
                 "extracted": {
                     "filenames": parsed.filenames,
                     "sizes": parsed.sizes,
-                    "hashes": parsed.hashes,
+                    "hashes": parsed_hashes,
                     "dates": parsed.dates,
                     "links": parsed.links,
                     "link_contexts": parsed.link_contexts,
@@ -260,6 +302,11 @@ class Crawler:
                 "truncated": fetch.truncated,
             }, indent=2, ensure_ascii=False), encoding="utf-8")
         blocked = fetch.status_code in {401, 403, 429, 451}
+        classification = reference_route_classification(
+            final_url,
+            fetch.status_code,
+            fetch.headers.get("content-type", ""),
+        ) or classify(scored.score, self.config, fetch.status_code, blocked=blocked)
         finding = Finding(
             timestamp_utc=now, source=item["source"], query=item["query_text"],
             discovery_method="recursive_html_fetch", source_url=item["original_url"],
@@ -268,10 +315,10 @@ class Crawler:
             reported_size=matching_size.get("original", "") if matching_size else "",
             normalized_size_bytes=matching_size.get("bytes") if matching_size else None,
             content_type=fetch.headers.get("content-type", ""), response_headers=fetch.headers,
-            hashes=parsed.hashes, dates=parsed.dates, redirect_chain=fetch.redirect_chain,
+            hashes=parsed_hashes, dates=parsed.dates, redirect_chain=fetch.redirect_chain,
             page_title=parsed.title, canonical_url=parsed.canonical_url, context_excerpt=excerpt,
             depth=depth, score=scored.score, score_reasons=scored.reasons,
-            classification=classify(scored.score, self.config, fetch.status_code, blocked=blocked),
+            classification=classification,
             first_seen=item["created_at"], last_checked=now,
             notes="HTML/text evidence observed directly." + (" Response truncated at configured ceiling." if fetch.truncated else ""),
             original_url=item["original_url"], normalized_url=item["normalized_url"],
@@ -282,7 +329,9 @@ class Crawler:
         if canonical and canonical != normalize_url(final_url):
             self.database.add_relationship(final_url, canonical, "same_content_reference", "HTML canonical URL")
         if scored.score >= self.config.scoring.likely_threshold:
-            for hash_item in parsed.hashes:
+            for hash_item in parsed_hashes:
+                if hash_item.get("artifact_type"):
+                    continue
                 if not _hash_is_contextual(parsed.text, hash_item["value"], self.database.pivot_map()):
                     continue
                 added = self.database.add_pivot("hash", hash_item["value"], final_url, f"contextual_{hash_item['algorithm']}")
