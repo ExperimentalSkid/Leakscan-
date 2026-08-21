@@ -8,6 +8,7 @@ case:
     - example-item-id
   filenames:
     - "Example Dataset.7z"
+  search_hashes: []
   reported_sizes:
     - "500 MB"
   distinctive_phrases:
@@ -15,4 +16,7 @@ case:
   aliases:
     - Example_Dataset
   translated_descriptors: []
+  actor_aliases: []
+  incident_terms: []
+  public_channels: []
   exclusion_terms: []

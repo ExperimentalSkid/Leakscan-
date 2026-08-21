@@ -17,7 +17,10 @@ class DuckDuckGoProvider(SearchProvider):
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         response = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
         if response.status_code in {202, 403, 429}:
-            raise ProviderUnavailable(f"HTTP {response.status_code}: interactive verification or rate limit")
+            raise ProviderUnavailable(
+                f"HTTP {response.status_code}: interactive verification or rate limit",
+                status_code=response.status_code,
+            )
         response.raise_for_status()
         soup = BeautifulSoup(response.text, "html.parser")
         output: list[SearchResult] = []

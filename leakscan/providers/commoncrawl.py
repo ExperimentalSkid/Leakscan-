@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import json
-import re
 
 import httpx
 
 from ..models import SearchResult
-from .base import ProviderUnavailable, SearchProvider
+from .base import ProviderUnavailable, SearchProvider, archive_index_pattern
 
 
 class CommonCrawlProvider(SearchProvider):
     name = "commoncrawl"
+    query_capabilities = frozenset({"filename", "identifier", "phrase", "site", "url"})
     _index_url = ""
 
     async def _latest_index(self, client: httpx.AsyncClient) -> str:
@@ -24,16 +24,11 @@ class CommonCrawlProvider(SearchProvider):
         self._index_url = data[0]["cdx-api"]
         return self._index_url
 
-    @staticmethod
-    def _pattern(query: str) -> str:
-        cleaned = query.replace('"', "").strip()
-        url_match = re.search(r"https?://([^\s]+)", cleaned)
-        if url_match:
-            return url_match.group(1).rstrip("/") + "*"
-        tokens = re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
-        if not tokens:
-            return ""
-        return "*" + max(tokens, key=len) + "*"
+    def _pattern(self, query: str) -> str:
+        return archive_index_pattern(query, self.archive_extensions)
+
+    def request_key(self, query: str) -> str:
+        return self._pattern(query).casefold()
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         pattern = self._pattern(query)
@@ -44,7 +39,8 @@ class CommonCrawlProvider(SearchProvider):
             index_url,
             params={"url": pattern, "output": "json", "filter": "status:200", "collapse": "urlkey", "pageSize": limit},
         )
-        if response.status_code == 400:
+        # The CDX server uses 404 for a valid query with no captures.
+        if response.status_code in {400, 404}:
             return []
         response.raise_for_status()
         results: list[SearchResult] = []
@@ -57,7 +53,8 @@ class CommonCrawlProvider(SearchProvider):
             if url:
                 results.append(SearchResult(
                     url=url, title="Common Crawl indexed URL", excerpt=f"Captured {item.get('timestamp', '')}",
-                    provider=self.name, query=query, published=item.get("timestamp", ""), metadata=item,
+                    provider=self.name, query=query, published=item.get("timestamp", ""),
+                    source_url=index_url, record_id=item.get("digest", ""), metadata=item,
                 ))
             if len(results) >= limit:
                 break

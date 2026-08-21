@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS url_queue (
     referrer_url TEXT,
     source TEXT,
     query_text TEXT,
+    reference_kind TEXT NOT NULL DEFAULT '',
     depth INTEGER NOT NULL,
     priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -105,7 +106,18 @@ class CaseDatabase:
         self.connection = sqlite3.connect(self.path)
         self.connection.row_factory = sqlite3.Row
         self.connection.executescript(SCHEMA)
+        self._migrate_schema()
         self.connection.commit()
+
+    def _migrate_schema(self) -> None:
+        """Apply additive migrations needed by resumable databases."""
+        queue_columns = {
+            row["name"] for row in self.connection.execute("PRAGMA table_info(url_queue)")
+        }
+        if "reference_kind" not in queue_columns:
+            self.connection.execute(
+                "ALTER TABLE url_queue ADD COLUMN reference_kind TEXT NOT NULL DEFAULT ''"
+            )
 
     def close(self) -> None:
         self.connection.close()
@@ -130,6 +142,20 @@ class CaseDatabase:
         for row in rows:
             yield Finding.from_dict(json.loads(row["payload_json"]))
 
+    def findings_for_urls(self, urls: Iterable[str]) -> list[Finding]:
+        """Return observations attached to any supplied normalized/final URL."""
+        values = sorted({value for value in urls if value})
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        rows = self.connection.execute(
+            f"""SELECT payload_json FROM findings
+                WHERE normalized_url IN ({placeholders}) OR final_url IN ({placeholders})
+                ORDER BY id""",  # noqa: S608 - placeholders, not values, form the SQL text.
+            (*values, *values),
+        )
+        return [Finding.from_dict(json.loads(row["payload_json"])) for row in rows]
+
     def enqueue_url(
         self,
         original_url: str,
@@ -137,6 +163,7 @@ class CaseDatabase:
         referrer_url: str = "",
         source: str = "",
         query: str = "",
+        reference_kind: str = "",
         depth: int = 0,
         priority: int = 0,
     ) -> bool:
@@ -145,9 +172,13 @@ class CaseDatabase:
         now = utc_now()
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO url_queue
-               (normalized_url, original_url, referrer_url, source, query_text, depth, priority, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (normalized_url, original_url, referrer_url, source, query, depth, priority, now, now),
+               (normalized_url, original_url, referrer_url, source, query_text, reference_kind,
+                depth, priority, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                normalized_url, original_url, referrer_url, source, query, reference_kind,
+                depth, priority, now, now,
+            ),
         )
         self.connection.commit()
         return cursor.rowcount > 0
@@ -221,6 +252,48 @@ class CaseDatabase:
         )
         self.connection.commit()
 
+    def iter_queries(self) -> list[dict[str, Any]]:
+        return [
+            dict(row)
+            for row in self.connection.execute(
+                """SELECT provider, query_text, status, result_count, last_error, updated_at
+                   FROM queries ORDER BY provider, updated_at, query_text"""
+            )
+        ]
+
+    def get_provider_state(self, provider: str, state_key: str) -> Any | None:
+        row = self.connection.execute(
+            "SELECT value_json FROM provider_state WHERE provider=? AND state_key=?",
+            (provider, state_key),
+        ).fetchone()
+        return json.loads(row["value_json"]) if row else None
+
+    def set_provider_state(self, provider: str, state_key: str, value: Any) -> None:
+        self.connection.execute(
+            """INSERT INTO provider_state(provider, state_key, value_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(provider, state_key) DO UPDATE SET
+               value_json=excluded.value_json, updated_at=excluded.updated_at""",
+            (provider, state_key, json.dumps(value, ensure_ascii=False, sort_keys=True), utc_now()),
+        )
+        self.connection.commit()
+
+    def clear_provider_state(self, provider: str, state_key: str) -> None:
+        self.connection.execute(
+            "DELETE FROM provider_state WHERE provider=? AND state_key=?",
+            (provider, state_key),
+        )
+        self.connection.commit()
+
+    def provider_request_count(self, provider: str) -> int:
+        value = self.get_provider_state(provider, "requests_sent")
+        return int(value.get("count", 0)) if isinstance(value, dict) else 0
+
+    def increment_provider_request_count(self, provider: str) -> int:
+        count = self.provider_request_count(provider) + 1
+        self.set_provider_state(provider, "requests_sent", {"count": count})
+        return count
+
     def add_pivot(self, pivot_type: str, value: str, source_url: str, confidence: str) -> bool:
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO pivots
@@ -286,10 +359,17 @@ class CaseDatabase:
         return [dict(row) for row in self.connection.execute("SELECT * FROM domain_observations ORDER BY hostname")]
 
     def stats(self) -> dict[str, Any]:
+        provider_requests = {
+            row["provider"]: int(json.loads(row["value_json"]).get("count", 0))
+            for row in self.connection.execute(
+                "SELECT provider, value_json FROM provider_state WHERE state_key='requests_sent'"
+            )
+        }
         return {
             "findings": self.connection.execute("SELECT COUNT(*) FROM findings").fetchone()[0],
             "queries": self.connection.execute("SELECT COUNT(*) FROM queries").fetchone()[0],
             "pivots": self.connection.execute("SELECT COUNT(*) FROM pivots").fetchone()[0],
             "relationships": self.connection.execute("SELECT COUNT(*) FROM relationships").fetchone()[0],
+            "provider_requests": provider_requests,
             "queue": self.queue_counts(),
         }

@@ -11,25 +11,41 @@ crawl:
   max_html_bytes: 2097152
   max_redirects: 10
   respect_robots_txt: true
-  user_agent: "Leakscan/1.0 (+public-reference research; metadata-only archive checks)"
+  user_agent: "Leakscan/{version} (+public-reference research; metadata-only archive checks)"
 
 search:
   providers:
     - duckduckgo
     - commoncrawl
     - archive_org
+    - archive_org_items
+    - archive_org_files
+    - arquivo_pt
+    - gdelt
     - urlscan
-    - brave
-    - bing
+    - telegram_public
     - google
+    - mojeek
+    - searxng
     - github
+    - github_releases
     - gitlab
+    - gitlab_assets
+    - huggingface
+    - kaggle
+    - hybrid_analysis
+    - leakix
     - virustotal
     - otx
   results_per_query: 20
-  max_queries_per_provider: 80
+  max_result_pages_per_query: 3
+  max_queries_per_provider: 60
+  minimum_queries_before_plateau: 45
+  stop_after_stale_queries: 10
   max_pivot_rounds: 20
   max_pivots_per_round: 50
+  provider_failure_threshold: 2
+  provider_rate_limit_cooldown_seconds: 300
   safe_search: "off"
   intent_terms: [leak, breach, dump, mirror, download]
 
@@ -40,6 +56,6 @@ scoring:
   size_tolerance_fraction: 0.08
 
 safety:
-  archive_extensions: [.7z, .zip, .rar, .tar, .gz, .bz2, .xz]
+  archive_extensions: [.tar.gz, .tar.bz2, .tar.xz, .tar.zst, .7z.001, .zip.001, .part1.rar, .part01.rar, .7z, .zip, .zipx, .rar, .tar, .gz, .bz2, .xz, .tgz, .tbz2, .txz, .zst, .tzst, .cab, .iso, ".001"]
   allowed_schemes: [http, https]
   reject_private_networks: true

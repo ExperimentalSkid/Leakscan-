@@ -11,10 +11,11 @@ from .catalogs import adapter_for
 from .config import AppConfig, initial_fingerprints
 from .database import CaseDatabase
 from .domains import inspect_domain, parent_domain
+from .host_verifiers import reference_route_classification
 from .http import SafeHTTPClient
 from .models import Finding
-from .parser import context_excerpt
-from .scoring import classify, score_candidate
+from .parser import context_excerpt, parse_page
+from .scoring import classify, has_case_correlation, score_candidate
 from .utils.time import utc_now
 from .utils.urls import filename_from_url, hostname_for, normalize_url
 
@@ -32,10 +33,32 @@ class CatalogBootstrapper:
 
     def register_case_fingerprints(self) -> None:
         for kind, values in initial_fingerprints(self.config.case).items():
-            if kind == "exclusion":
+            if kind in {"exclusion", "artifact_hash"}:
                 continue
             for value in values:
                 self.database.add_pivot(kind, value, str(self.config.case_path), "operator_supplied")
+        for artifact in self.config.case.artifacts:
+            source_url = artifact.report_url or artifact.subject_url or str(self.config.case_path)
+            for item in artifact.hashes:
+                value = item.get("value", "").strip().casefold()
+                if value:
+                    self.database.add_pivot(
+                        "artifact_hash",
+                        value,
+                        source_url,
+                        f"operator_supplied:{artifact.artifact_type}",
+                    )
+            if artifact.report_url:
+                normalized = normalize_url(artifact.report_url)
+                self.database.enqueue_url(
+                    artifact.report_url,
+                    normalized,
+                    referrer_url=artifact.subject_url,
+                    source=artifact.source,
+                    query="operator-supplied artifact report",
+                    depth=0,
+                    priority=40,
+                )
 
     async def run(self) -> int:
         self.register_case_fingerprints()
@@ -76,6 +99,11 @@ class CatalogBootstrapper:
             return False
 
         adapter = adapter_for(seed)
+        parsed_page = parse_page(
+            fetch.body,
+            fetch.final_url or normalized,
+            fetch.headers.get("content-type", ""),
+        )
         record = adapter.parse(fetch.body, fetch.final_url or normalized, fetch.headers.get("content-type", ""), self.config)
         seed_fragment = unquote(urlsplit(seed.url).fragment)
         if seed_fragment and any(seed_fragment.lower().endswith(ext.lower()) for ext in self.config.safety.archive_extensions):
@@ -148,7 +176,12 @@ class CatalogBootstrapper:
             response_headers=fetch.headers,
             redirect_chain=fetch.redirect_chain, page_title=record.title, context_excerpt=excerpt,
             depth=0, score=scored.score, score_reasons=scored.reasons,
-            classification=classify(scored.score, self.config, fetch.status_code),
+            classification=reference_route_classification(
+                record.source_url,
+                fetch.status_code,
+                fetch.headers.get("content-type", ""),
+                parsed_page.text,
+            ) or classify(scored.score, self.config, fetch.status_code),
             first_seen=now, last_checked=now,
             notes=f"Directly observed public catalog metadata via {adapter.name}; archive body not requested.",
             original_url=seed.url, normalized_url=normalized, evidence_sha256=evidence_hash,
@@ -162,7 +195,7 @@ class CatalogBootstrapper:
             link_score = score_candidate(
                 self.config, normalized_link, title=record.title, fingerprints=self.database.pivot_map()
             )
-            if link_score.score > 0:
+            if has_case_correlation(link_score):
                 self.database.enqueue_url(
                     link, normalized_link, referrer_url=record.source_url, source=seed.source,
                     query="catalog bootstrap", depth=1, priority=link_score.score,

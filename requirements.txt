@@ -6,8 +6,9 @@ rapidfuzz>=3.9,<4
 tldextract>=5.1,<6
 
 # Development / verification
-pytest>=8.2,<9
-pytest-asyncio>=0.23,<1
+pytest>=9.0.3,<10
+pytest-asyncio>=1.2,<2
 ruff>=0.6,<1
 build>=1.2,<2
 twine>=5,<7
+pip-audit>=2.10,<3

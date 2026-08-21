@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import yaml
+
+from . import __version__
 
 
 @dataclass(slots=True)
@@ -20,16 +23,32 @@ class SeedConfig:
 
 
 @dataclass(slots=True)
+class ArtifactReferenceConfig:
+    source: str
+    artifact_type: str
+    subject_url: str = ""
+    report_url: str = ""
+    observed_at: str = ""
+    hashes: list[dict[str, str]] = field(default_factory=list)
+    notes: str = ""
+
+
+@dataclass(slots=True)
 class CaseConfig:
     name: str
     seeds: list[SeedConfig]
     item_ids: list[str] = field(default_factory=list)
     filenames: list[str] = field(default_factory=list)
+    search_hashes: list[str] = field(default_factory=list)
     reported_sizes: list[str] = field(default_factory=list)
     distinctive_phrases: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     translated_descriptors: list[str] = field(default_factory=list)
+    actor_aliases: list[str] = field(default_factory=list)
+    incident_terms: list[str] = field(default_factory=list)
+    public_channels: list[str] = field(default_factory=list)
     exclusion_terms: list[str] = field(default_factory=list)
+    artifacts: list[ArtifactReferenceConfig] = field(default_factory=list)
 
     @property
     def primary_seed_url(self) -> str:
@@ -49,16 +68,21 @@ class CrawlConfig:
     max_html_bytes: int = 2 * 1024 * 1024
     max_redirects: int = 10
     respect_robots_txt: bool = True
-    user_agent: str = "Leakscan/1.0"
+    user_agent: str = "Leakscan/{version}"
 
 
 @dataclass(slots=True)
 class SearchConfig:
     providers: list[str] = field(default_factory=list)
     results_per_query: int = 20
-    max_queries_per_provider: int = 80
+    max_result_pages_per_query: int = 3
+    max_queries_per_provider: int = 60
+    minimum_queries_before_plateau: int = 45
+    stop_after_stale_queries: int = 10
     max_pivot_rounds: int = 20
     max_pivots_per_round: int = 50
+    provider_failure_threshold: int = 2
+    provider_rate_limit_cooldown_seconds: int = 300
     safe_search: str = "off"
     intent_terms: list[str] = field(default_factory=lambda: ["leak", "breach", "dump", "mirror", "download"])
 
@@ -73,7 +97,12 @@ class ScoringConfig:
 
 @dataclass(slots=True)
 class SafetyConfig:
-    archive_extensions: list[str] = field(default_factory=lambda: [".7z", ".zip", ".rar"])
+    archive_extensions: list[str] = field(default_factory=lambda: [
+        ".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz",
+        ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+        ".tar.zst", ".tzst", ".zst", ".zipx", ".7z.001", ".zip.001",
+        ".part1.rar", ".part01.rar", ".cab", ".iso", ".001",
+    ])
     allowed_schemes: list[str] = field(default_factory=lambda: ["http", "https"])
     reject_private_networks: bool = True
 
@@ -111,15 +140,23 @@ def load_config(
     with resolved_case.open("r", encoding="utf-8") as handle:
         raw_case = dict((yaml.safe_load(handle) or {}).get("case", {}))
     seeds = [SeedConfig(**item) for item in raw_case.pop("seeds", [])]
-    case = CaseConfig(seeds=seeds, **raw_case)
-    if not case.seeds:
-        raise ValueError("case file must define at least one public seed URL")
-    if not (case.item_ids or case.filenames or case.distinctive_phrases):
+    artifacts = [ArtifactReferenceConfig(**item) for item in raw_case.pop("artifacts", [])]
+    case = CaseConfig(seeds=seeds, artifacts=artifacts, **raw_case)
+    if not (
+        case.seeds
+        or case.item_ids
+        or case.filenames
+        or case.search_hashes
+        or case.distinctive_phrases
+        or case.aliases
+    ):
         raise ValueError("case file must define at least one identifying fingerprint")
     default_output = resolved_case.parent.parent / f"case_{_safe_case_name(case.name)}"
+    crawl = CrawlConfig(**settings.get("crawl", {}))
+    crawl.user_agent = _render_user_agent(crawl.user_agent)
     return AppConfig(
         case=case,
-        crawl=CrawlConfig(**settings.get("crawl", {})),
+        crawl=crawl,
         search=SearchConfig(**settings.get("search", {})),
         scoring=ScoringConfig(**settings.get("scoring", {})),
         safety=SafetyConfig(**settings.get("safety", {})),
@@ -127,6 +164,16 @@ def load_config(
         settings_path=resolved_settings,
         case_path=resolved_case,
     )
+
+
+def _render_user_agent(template: str) -> str:
+    user_agent = template.replace("{version}", __version__)
+    contact = re.sub(r"[\x00-\x1f\x7f]+", "", os.getenv("LEAKSCAN_CONTACT", "")).strip()[:200]
+    if not contact:
+        return user_agent
+    if user_agent.endswith(")"):
+        return f"{user_agent[:-1]}; contact={contact})"
+    return f"{user_agent} contact={contact}"
 
 
 def _safe_case_name(value: str) -> str:
@@ -151,31 +198,171 @@ def initial_fingerprints(case: CaseConfig) -> dict[str, set[str]]:
         "item_id": {value for value in case.item_ids if value},
         "filename": {value for value in case.filenames if value},
         "size": {value for value in case.reported_sizes if value},
-        "phrase": {value for value in case.distinctive_phrases if value},
-        "alias": {value for value in [*case.aliases, *case.translated_descriptors] if value},
+        "phrase": {
+            value for value in [*case.distinctive_phrases, *case.incident_terms] if value
+        },
+        "alias": {
+            value
+            for value in [*case.aliases, *case.translated_descriptors, *case.actor_aliases]
+            if value
+        },
         "exclusion": {value for value in case.exclusion_terms if value},
         "hash": set(),
+        "search_hash": {value.casefold() for value in case.search_hashes if value},
+        "artifact_hash": {
+            item.get("value", "")
+            for artifact in case.artifacts
+            for item in artifact.hashes
+            if item.get("value")
+        },
         "account": set(),
         "domain": {(urlsplit(seed.url).hostname or "").lower() for seed in case.seeds},
     }
 
 
-def filename_variants(filename: str, archive_extensions: list[str]) -> set[str]:
-    path = Path(filename)
-    stem = path.stem if path.suffix else filename
-    variants = {
+def filename_variants(filename: str, archive_extensions: list[str]) -> list[str]:
+    lowered = filename.casefold()
+    matched_suffix = next(
+        (
+            extension
+            for extension in sorted(archive_extensions, key=len, reverse=True)
+            if lowered.endswith(extension.casefold())
+        ),
+        "",
+    )
+    stem = filename[:-len(matched_suffix)] if matched_suffix else Path(filename).stem
+    variants = [
         filename,
         stem,
+        quote(filename),
         filename.replace(" ", "_"),
         filename.replace(" ", "-"),
-        quote(filename),
         re.sub(r"[^\w\s.-]", "", filename),
         filename.lower(),
         filename.upper(),
-    }
+    ]
     for extension in archive_extensions:
-        variants.add(stem + extension)
-    return {value for value in variants if value}
+        variants.append(stem + extension)
+    return list(dict.fromkeys(value for value in variants if value))
+
+
+KEYWORD_STOPWORDS = {
+    "a", "an", "and", "archive", "backup", "data", "database", "dataset", "de", "des",
+    "document", "documents", "du", "dump", "et", "file", "files", "for", "from", "la",
+    "le", "les", "of", "or", "the", "to", "un", "une", "y",
+}
+
+
+def keyword_variants(
+    value: str,
+    archive_extensions: Iterable[str],
+    *,
+    limit: int = 8,
+) -> list[str]:
+    """Return bounded multi-word fragments that survive common mirror renaming."""
+    cleaned = unquote(value).strip()
+    lowered = cleaned.casefold()
+    matched_suffix = next(
+        (
+            extension
+            for extension in sorted(archive_extensions, key=len, reverse=True)
+            if lowered.endswith(extension.casefold())
+        ),
+        "",
+    )
+    if matched_suffix:
+        cleaned = cleaned[:-len(matched_suffix)]
+    tokens = re.findall(r"[^\W_]+", cleaned, flags=re.UNICODE)
+    if len(tokens) < 3:
+        return []
+
+    def is_signal(token: str) -> bool:
+        normalized = token.casefold()
+        if normalized.isdigit():
+            return len(normalized) >= 4
+        return (
+            (token.isupper() and 2 <= len(token) <= 10)
+            or (len(normalized) >= 3 and normalized not in KEYWORD_STOPWORDS)
+        )
+
+    output: list[str] = []
+    maximum_window = min(5, len(tokens) - 1)
+    for window_size in range(maximum_window, 2, -1):
+        for start in range(0, len(tokens) - window_size + 1):
+            window = tokens[start:start + window_size]
+            signal_count = sum(is_signal(token) for token in window)
+            fragment = " ".join(window)
+            if (
+                signal_count >= 2
+                and len(fragment) >= 12
+                and window[0].casefold() not in KEYWORD_STOPWORDS
+                and window[-1].casefold() not in KEYWORD_STOPWORDS
+            ):
+                output.append(fragment)
+            if len(dict.fromkeys(item.casefold() for item in output)) >= limit:
+                return _deduplicate_casefold(output)[:limit]
+    return _deduplicate_casefold(output)[:limit]
+
+
+def keyword_variants_for_values(
+    values: Iterable[str],
+    archive_extensions: Iterable[str],
+    *,
+    limit: int = 24,
+) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        output.extend(keyword_variants(value, archive_extensions))
+        if len(_deduplicate_casefold(output)) >= limit:
+            break
+    return _deduplicate_casefold(output)[:limit]
+
+
+def _deduplicate_casefold(values: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
+
+
+def _relaxed_keyword_queries(values: Iterable[str], archive_extensions: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        cleaned = unquote(value).strip()
+        lowered = cleaned.casefold()
+        suffix = next(
+            (
+                extension
+                for extension in sorted(archive_extensions, key=len, reverse=True)
+                if lowered.endswith(extension.casefold())
+            ),
+            "",
+        )
+        if suffix:
+            cleaned = cleaned[:-len(suffix)]
+        tokens = re.findall(r"[^\W_]+", cleaned, flags=re.UNICODE)
+        if len(tokens) < 3:
+            continue
+        normalized = " ".join(tokens)
+        output.append(normalized)
+        first_signal = next(
+            (
+                index
+                for index, token in enumerate(tokens)
+                if (token.isupper() and len(token) >= 2)
+                or (len(token) >= 3 and token.casefold() not in KEYWORD_STOPWORDS)
+            ),
+            None,
+        )
+        if first_signal is not None and len(tokens[first_signal + 1:]) >= 2:
+            output.append(
+                f'"{tokens[first_signal]}" "{" ".join(tokens[first_signal + 1:])}"'
+            )
+    return _deduplicate_casefold(output)[:16]
 
 
 def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None = None) -> list[str]:
@@ -183,31 +370,81 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
     for kind, entries in (fingerprints or {}).items():
         values.setdefault(kind, set()).update(entry for entry in entries if entry)
     queries: list[str] = []
+    deferred_filename_variants: list[str] = []
+    deferred_intent_queries: list[str] = []
+    keyword_sources = sorted(
+        values["filename"] | values["alias"] | set(config.case.distinctive_phrases)
+    )
+    keywords = keyword_variants_for_values(
+        keyword_sources,
+        config.safety.archive_extensions,
+    )
     for filename in sorted(values["filename"]):
-        for variant in sorted(filename_variants(filename, config.safety.archive_extensions)):
+        variants = filename_variants(filename, config.safety.archive_extensions)
+        stem = variants[1] if len(variants) > 1 else Path(filename).stem
+        extension_variants = {stem + extension for extension in config.safety.archive_extensions}
+        strong_variants = [
+            variant
+            for variant in variants
+            if variant == filename or variant not in extension_variants
+        ]
+        for variant in strong_variants:
             queries.append(f'"{variant}"')
-        stem = Path(filename).stem
+        deferred_filename_variants.extend(
+            f'"{variant}"' for variant in variants if variant not in strong_variants
+        )
         for term in config.search.intent_terms:
-            queries.append(f'"{stem}" {term}')
+            deferred_intent_queries.append(f'"{stem}" {term}')
+    queries.extend(f'"{keyword}"' for keyword in keywords)
+    queries.extend(_relaxed_keyword_queries(keyword_sources, config.safety.archive_extensions))
     for item_id in sorted(values["item_id"]):
         queries.append(f'"{item_id}"')
         for filename in sorted(values["filename"]):
             suffix = Path(filename).suffix.lstrip(".")
             if suffix:
                 queries.append(f'"{item_id}" "{suffix}"')
+        queries.extend(f'"{item_id}" "{keyword}"' for keyword in keywords[:5])
+    # Cover every configured archive extension inside the default discovery
+    # floor. Provider request-key deduplication still collapses equivalent
+    # archive-index lookups before any network request is made.
+    queries.extend(deferred_filename_variants)
+    queries.extend(
+        f'"{digest}"'
+        for digest in sorted(values["hash"] | values["search_hash"] | values["artifact_hash"])
+    )
+    queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
+    queries.extend(
+        f'"{artifact.report_url}"'
+        for artifact in config.case.artifacts
+        if artifact.report_url
+    )
     for phrase in sorted(values["phrase"] | values["alias"]):
         queries.append(f'"{phrase}"')
         for term in config.search.intent_terms:
-            queries.append(f'"{phrase}" {term}')
+            deferred_intent_queries.append(f'"{phrase}" {term}')
+    case_anchors = list(dict.fromkeys([
+        *config.case.distinctive_phrases,
+        *config.case.aliases,
+        *config.case.translated_descriptors,
+    ]))
+    for actor in config.case.actor_aliases:
+        for anchor in case_anchors[:5]:
+            if actor.casefold() != anchor.casefold():
+                queries.append(f'"{actor}" "{anchor}"')
+        for item_id in config.case.item_ids:
+            queries.append(f'"{actor}" "{item_id}"')
+    queries.extend(f'"{account}"' for account in sorted(values["account"]))
+    for domain in sorted(values["domain"]):
+        queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))
     for size in sorted(values["size"]):
-        anchors = sorted(values["alias"] | values["phrase"])
+        anchors = list(dict.fromkeys([
+            *sorted(values["filename"]),
+            *sorted(values["alias"] | values["phrase"]),
+            *keywords,
+        ]))
         if anchors:
             queries.extend(f'"{anchor}" "{size}"' for anchor in anchors[:5])
         else:
             queries.append(f'"{size}"')
-    queries.extend(f'"{digest}"' for digest in sorted(values["hash"]))
-    queries.extend(f'"{account}"' for account in sorted(values["account"]))
-    for domain in sorted(values["domain"]):
-        queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))
-    queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
+    queries.extend(deferred_intent_queries)
     return list(dict.fromkeys(queries))

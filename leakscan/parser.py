@@ -24,8 +24,11 @@ SIZE_RE = re.compile(r"(?i)(?<![\w.])(\d+(?:[.,]\d+)?)\s*(bytes?|[kmgt]i?b)(?!\w
 DATE_RE = re.compile(
     r"(?<!\d)(?:20\d{2}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]20\d{2})(?!\d)"
 )
+ARCHIVE_SUFFIX_PATTERN = (
+    r"(?:tar\.gz|tar\.bz2|7z\.\d{3}|part\d+\.rar|7z|zipx?|rar|tar|gz|bz2|xz|tgz|tbz2|zst|\d{3})"
+)
 FILENAME_RE = re.compile(
-    r"(?i)(?<![\w])([A-Za-z0-9][A-Za-z0-9 _().\[\]&+,'-]{0,180}\.(?:7z|zip|rar|tar|gz|bz2|xz))\b"
+    rf"(?i)(?<![\w])([A-Za-z0-9][A-Za-z0-9 _().\[\]&+,'-]{{0,180}}\.{ARCHIVE_SUFFIX_PATTERN})\b"
 )
 
 
@@ -154,7 +157,7 @@ def _filename_from_link(url: str) -> str:
     from urllib.parse import urlsplit
 
     name = PurePosixPath(unquote(urlsplit(url).path)).name
-    return name if re.search(r"(?i)\.(?:7z|zip|rar|tar|gz|bz2|xz)$", name) else ""
+    return name if re.search(rf"(?i)\.{ARCHIVE_SUFFIX_PATTERN}$", name) else ""
 
 
 def context_excerpt(text: str, needles: list[str], width: int = 500) -> str:

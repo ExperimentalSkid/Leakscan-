@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from rapidfuzz.fuzz import ratio
 
-from .config import AppConfig, initial_fingerprints
+from .config import AppConfig, initial_fingerprints, keyword_variants_for_values
 from .parser import normalize_size
 from .utils.urls import filename_from_url, looks_like_archive_url
 
@@ -17,6 +19,63 @@ from .utils.urls import filename_from_url, looks_like_archive_url
 class ScoreResult:
     score: int
     reasons: list[dict[str, Any]]
+
+
+NON_CORRELATING_REASONS = {"archive_reference", "case_exclusion_term"}
+
+STRONG_TARGET_IDENTITY_REASONS = {
+    "exact_item_id",
+    "exact_filename",
+    "filename_similarity_above_threshold",
+    "known_hash_match",
+}
+
+CORROBORATING_TARGET_IDENTITY_REASONS = {
+    "distinctive_phrase",
+    "case_alias",
+    "keyword_fragment",
+    "catalog_account",
+    "approximate_size_match",
+}
+
+
+def has_case_correlation(result: ScoreResult) -> bool:
+    """Return true only when evidence connects a URL to case fingerprints.
+
+    A generic archive extension is useful discovery metadata, but it is not a
+    target correlation by itself.
+    """
+    return any(
+        int(item.get("points", 0)) > 0
+        and item.get("reason", "") not in NON_CORRELATING_REASONS
+        for item in result.reasons
+    )
+
+
+def target_identity_basis(reasons: list[dict[str, Any]]) -> list[str]:
+    """Return the evidence types that establish the candidate's target identity.
+
+    File/archive metadata proves that an object exists, not that it is the
+    object named by the case. Identity therefore requires one strong exact
+    signal or at least two independent corroborating case fingerprints.
+    """
+    present = {
+        str(item.get("reason", ""))
+        for item in reasons
+        if int(item.get("points", 0)) > 0
+    }
+    if "case_exclusion_term" in {str(item.get("reason", "")) for item in reasons}:
+        return []
+    strong = sorted(present & STRONG_TARGET_IDENTITY_REASONS)
+    if strong:
+        return strong
+    corroborating = sorted(present & CORROBORATING_TARGET_IDENTITY_REASONS)
+    return corroborating if len(corroborating) >= 2 else []
+
+
+def has_target_identity(result: ScoreResult) -> bool:
+    """Return true only when evidence identifies the file as the case target."""
+    return bool(target_identity_basis(result.reasons))
 
 
 def target_size_ranges(reported_sizes: str | list[str], tolerance: float) -> list[tuple[int, int]]:
@@ -46,6 +105,10 @@ def _merge_fingerprints(config: AppConfig, fingerprints: dict[str, set[str]] | N
     values = initial_fingerprints(config.case)
     for kind, entries in (fingerprints or {}).items():
         values.setdefault(kind, set()).update(entry for entry in entries if entry)
+    values["keyword"] = set(keyword_variants_for_values(
+        values["filename"] | values["alias"] | set(config.case.distinctive_phrases),
+        config.safety.archive_extensions,
+    ))
     return values
 
 
@@ -64,6 +127,7 @@ def score_candidate(
     values = _merge_fingerprints(config, fingerprints)
     combined = f"{url} {title} {context} {filename} {content_disposition}"
     lowered = combined.lower()
+    normalized = re.sub(r"[^\w]+", " ", unquote(combined).casefold()).strip()
     reasons: list[dict[str, Any]] = []
 
     def add(points: int, reason: str, evidence: str = "") -> None:
@@ -101,6 +165,14 @@ def score_candidate(
     matching_aliases = [value for value in values["alias"] if value.lower() in lowered]
     if matching_aliases:
         add(30, "case_alias", matching_aliases[0])
+    matching_keywords = [
+        value
+        for value in values["keyword"]
+        if re.sub(r"[^\w]+", " ", value.casefold()).strip() in normalized
+    ]
+    if not matching_names and not matching_phrases and not matching_aliases and matching_keywords:
+        strongest = max(matching_keywords, key=len)
+        add(35, "keyword_fragment", strongest)
     matching_accounts = [value for value in values["account"] if value.lower() in lowered]
     if matching_accounts:
         add(25, "catalog_account", matching_accounts[0])
@@ -139,7 +211,9 @@ def classify(
     blocked: bool = False,
     metadata_archive_confirmed: bool = False,
 ) -> str:
-    if blocked or status_code in {401, 403, 429, 451, 999}:
+    if status_code == 451:
+        return "TAKEN_DOWN"
+    if blocked or status_code in {401, 403, 429, 999}:
         return "BLOCKED"
     if status_code in {404, 410}:
         return "DEAD"
