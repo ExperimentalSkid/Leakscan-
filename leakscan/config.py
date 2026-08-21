@@ -42,6 +42,9 @@ class CaseConfig:
     distinctive_phrases: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
     translated_descriptors: list[str] = field(default_factory=list)
+    actor_aliases: list[str] = field(default_factory=list)
+    incident_terms: list[str] = field(default_factory=list)
+    public_channels: list[str] = field(default_factory=list)
     exclusion_terms: list[str] = field(default_factory=list)
     artifacts: list[ArtifactReferenceConfig] = field(default_factory=list)
 
@@ -188,8 +191,14 @@ def initial_fingerprints(case: CaseConfig) -> dict[str, set[str]]:
         "item_id": {value for value in case.item_ids if value},
         "filename": {value for value in case.filenames if value},
         "size": {value for value in case.reported_sizes if value},
-        "phrase": {value for value in case.distinctive_phrases if value},
-        "alias": {value for value in [*case.aliases, *case.translated_descriptors] if value},
+        "phrase": {
+            value for value in [*case.distinctive_phrases, *case.incident_terms] if value
+        },
+        "alias": {
+            value
+            for value in [*case.aliases, *case.translated_descriptors, *case.actor_aliases]
+            if value
+        },
         "exclusion": {value for value in case.exclusion_terms if value},
         "hash": set(),
         "artifact_hash": {
@@ -273,6 +282,17 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
         queries.append(f'"{phrase}"')
         for term in config.search.intent_terms:
             deferred_intent_queries.append(f'"{phrase}" {term}')
+    case_anchors = list(dict.fromkeys([
+        *config.case.distinctive_phrases,
+        *config.case.aliases,
+        *config.case.translated_descriptors,
+    ]))
+    for actor in config.case.actor_aliases:
+        for anchor in case_anchors[:5]:
+            if actor.casefold() != anchor.casefold():
+                queries.append(f'"{actor}" "{anchor}"')
+        for item_id in config.case.item_ids:
+            queries.append(f'"{actor}" "{item_id}"')
     queries.extend(f'"{account}"' for account in sorted(values["account"]))
     for domain in sorted(values["domain"]):
         queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))

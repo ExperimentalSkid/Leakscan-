@@ -71,9 +71,21 @@ class Crawler:
             batch = self.database.claim_pending(min(self.config.crawl.concurrency, remaining))
             if not batch:
                 break
-            await asyncio.gather(*(self._process(item, http) for item in batch))
+            await asyncio.gather(*(self._process_safely(item, http) for item in batch))
             processed += len(batch)
         return processed
+
+    async def _process_safely(self, item: dict, http: SafeHTTPClient) -> None:
+        """Keep one malformed or non-compliant response from terminating the case run."""
+        try:
+            await self._process(item, http)
+        except Exception as exc:  # noqa: BLE001 - queue boundary must isolate every URL.
+            url = item["normalized_url"]
+            error = f"{type(exc).__name__}: {exc}"
+            fetch = FetchResult(original_url=url, final_url=url, error=error)
+            self._record_failure(item, fetch)
+            self.database.mark_url(url, "failed", error)
+            LOG.warning("[FAILED] %s %s", url, error)
 
     async def _process(self, item: dict, http: SafeHTTPClient) -> None:
         url = item["normalized_url"]
@@ -135,7 +147,11 @@ class Crawler:
             referrer_url=item["referrer_url"], domain=hostname_for(fetch.final_url or item["normalized_url"]),
             status_code=fetch.status_code, depth=item["depth"], score=item["priority"],
             response_headers=fetch.headers,
-            classification=classify(item["priority"], self.config, fetch.status_code, blocked=blocked),
+            classification=(
+                "UNKNOWN"
+                if fetch.status_code is None and fetch.error
+                else classify(item["priority"], self.config, fetch.status_code, blocked=blocked)
+            ),
             first_seen=item["created_at"], last_checked=now,
             notes=fetch.blocked_reason or fetch.error, original_url=item["original_url"],
             normalized_url=item["normalized_url"], redirect_chain=fetch.redirect_chain,
@@ -269,6 +285,9 @@ class Crawler:
                 *self.config.case.filenames,
                 *self.config.case.distinctive_phrases,
                 *self.config.case.aliases,
+                *self.config.case.translated_descriptors,
+                *self.config.case.actor_aliases,
+                *self.config.case.incident_terms,
             ],
         )
         scored = score_candidate(
@@ -312,6 +331,7 @@ class Crawler:
             final_url,
             fetch.status_code,
             fetch.headers.get("content-type", ""),
+            parsed.text,
         ) or classify(scored.score, self.config, fetch.status_code, blocked=blocked)
         finding = Finding(
             timestamp_utc=now, source=item["source"], query=item["query_text"],

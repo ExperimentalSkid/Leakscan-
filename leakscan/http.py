@@ -44,6 +44,15 @@ class SafeHTTPClient:
     def __init__(self, config: AppConfig):
         self.config = config
         self.rate_limiter = HostRateLimiter(config.crawl.per_host_delay_seconds)
+        self._client_options = {
+            "timeout": httpx.Timeout(config.crawl.timeout_seconds),
+            "follow_redirects": False,
+            "headers": {
+                "User-Agent": config.crawl.user_agent,
+                "Accept": "text/html,text/plain,application/json,application/xml;q=0.9,*/*;q=0.1",
+            },
+            "event_hooks": {"request": [self.rate_limiter.on_request]},
+        }
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(config.crawl.timeout_seconds),
             follow_redirects=False,
@@ -51,6 +60,7 @@ class SafeHTTPClient:
             http2=True,
             event_hooks={"request": [self.rate_limiter.on_request]},
         )
+        self._http1_client: httpx.AsyncClient | None = None
         self._robots: dict[str, RobotsPolicy] = {}
 
     async def __aenter__(self) -> Self:
@@ -58,6 +68,13 @@ class SafeHTTPClient:
 
     async def __aexit__(self, *_: object) -> None:
         await self.client.aclose()
+        if self._http1_client is not None:
+            await self._http1_client.aclose()
+
+    async def _http1(self) -> httpx.AsyncClient:
+        if self._http1_client is None:
+            self._http1_client = httpx.AsyncClient(http2=False, **self._client_options)
+        return self._http1_client
 
     async def _allowed(self, url: str) -> tuple[bool, str]:
         ok, reason = await asyncio.to_thread(
@@ -83,6 +100,17 @@ class SafeHTTPClient:
         return True, ""
 
     async def _load_robots(self, origin: str) -> RobotsPolicy:
+        try:
+            return await self._load_robots_once(origin, self.client)
+        except Exception as exc:  # noqa: BLE001 - h2 exceptions are not httpx exceptions.
+            if not _needs_http1_fallback(exc):
+                raise
+            LOG.warning("[HTTP1-FALLBACK] robots.txt %s after %s", origin, type(exc).__name__)
+            return await self._load_robots_once(origin, await self._http1())
+
+    async def _load_robots_once(
+        self, origin: str, client: httpx.AsyncClient
+    ) -> RobotsPolicy:
         initial_url = origin + "/robots.txt"
         current = initial_url
         try:
@@ -95,10 +123,10 @@ class SafeHTTPClient:
                 )
                 if not ok:
                     return RobotsPolicy("disallow", monotonic(), reason=reason)
-                request = self.client.build_request(
+                request = client.build_request(
                     "GET", current, headers={"Range": f"bytes=0-{ROBOTS_MAX_BYTES - 1}"}
                 )
-                response = await self.client.send(request, stream=True)
+                response = await client.send(request, stream=True)
                 try:
                     if response.status_code in REDIRECT_STATUSES and response.headers.get("location"):
                         destination = normalize_url(urljoin(str(response.url), response.headers["location"]))
@@ -135,10 +163,18 @@ class SafeHTTPClient:
                 parser.parse(bytes(data).decode("utf-8", errors="replace").splitlines())
                 return RobotsPolicy("rules", monotonic(), parser=parser)
             return RobotsPolicy("disallow", monotonic(), reason="too many robots.txt redirects")
-        except (httpx.HTTPError, OSError) as exc:
-            return RobotsPolicy("disallow", monotonic(), reason=f"robots.txt unreachable: {type(exc).__name__}")
+        except Exception as exc:  # noqa: BLE001 - transport libraries expose non-httpx protocol errors.
+            if _needs_http1_fallback(exc):
+                raise
+            if _retryable_transport_error(exc):
+                return RobotsPolicy(
+                    "disallow", monotonic(), reason=f"robots.txt unreachable: {type(exc).__name__}"
+                )
+            raise
 
-    async def _headers_only(self, url: str, method: str) -> FetchResult:
+    async def _headers_only(
+        self, url: str, method: str, client: httpx.AsyncClient
+    ) -> FetchResult:
         result = FetchResult(original_url=url)
         current = url
         for _ in range(self.config.crawl.max_redirects + 1):
@@ -148,8 +184,8 @@ class SafeHTTPClient:
                 result.blocked_reason = reason
                 return result
             headers = {"Range": "bytes=0-0"} if method == "GET" else {}
-            request = self.client.build_request(method, current, headers=headers)
-            response = await self.client.send(request, stream=True)
+            request = client.build_request(method, current, headers=headers)
+            response = await client.send(request, stream=True)
             try:
                 response_headers = {key.lower(): value for key, value in response.headers.items()}
                 result.status_code = response.status_code
@@ -187,19 +223,37 @@ class SafeHTTPClient:
         host_request = host_verification_request(url)
         for attempt in range(self.config.crawl.retry_count + 1):
             try:
-                if host_request is not None:
-                    return await self._probe_host_metadata(url, host_request)
-                result = await self._headers_only(url, "HEAD")
-                if result.status_code not in {405, 501}:
-                    return result
-                return await self._headers_only(url, "GET")
-            except (httpx.HTTPError, OSError) as exc:
+                try:
+                    return await self._probe_metadata_once(url, host_request, self.client)
+                except Exception as exc:  # noqa: BLE001 - h2 exposes its own exception types.
+                    if not _needs_http1_fallback(exc):
+                        raise
+                    LOG.warning("[HTTP1-FALLBACK] metadata %s after %s", url, type(exc).__name__)
+                    return await self._probe_metadata_once(url, host_request, await self._http1())
+            except Exception as exc:  # noqa: BLE001 - normalized at the HTTP boundary.
+                if not _retryable_transport_error(exc):
+                    raise
                 if attempt >= self.config.crawl.retry_count:
                     return FetchResult(original_url=url, final_url=url, error=f"{type(exc).__name__}: {exc}")
                 await asyncio.sleep(self.config.crawl.retry_backoff_seconds * (2**attempt))
         return FetchResult(original_url=url, final_url=url, error="unreachable")
 
-    async def _probe_host_metadata(self, url: str, host_request) -> FetchResult:
+    async def _probe_metadata_once(
+        self,
+        url: str,
+        host_request,
+        client: httpx.AsyncClient,
+    ) -> FetchResult:
+        if host_request is not None:
+            return await self._probe_host_metadata(url, host_request, client)
+        result = await self._headers_only(url, "HEAD", client)
+        if result.status_code not in {405, 501}:
+            return result
+        return await self._headers_only(url, "GET", client)
+
+    async def _probe_host_metadata(
+        self, url: str, host_request, client: httpx.AsyncClient
+    ) -> FetchResult:
         result = FetchResult(original_url=url, final_url=url)
         current = host_request.url
         for _ in range(self.config.crawl.max_redirects + 1):
@@ -212,8 +266,8 @@ class SafeHTTPClient:
                     "object_id": host_request.object_id,
                 }
                 return result
-            request = self.client.build_request("GET", current, headers={"Accept": "application/json"})
-            response = await self.client.send(request, stream=True)
+            request = client.build_request("GET", current, headers={"Accept": "application/json"})
+            response = await client.send(request, stream=True)
             try:
                 result.status_code = response.status_code
                 result.headers = {key.lower(): value for key, value in response.headers.items()}
@@ -265,14 +319,22 @@ class SafeHTTPClient:
             return await self.probe_metadata(url)
         for attempt in range(self.config.crawl.retry_count + 1):
             try:
-                return await self._fetch_page_once(url)
-            except (httpx.HTTPError, OSError) as exc:
+                try:
+                    return await self._fetch_page_once(url, self.client)
+                except Exception as exc:  # noqa: BLE001 - h2 exposes its own exception types.
+                    if not _needs_http1_fallback(exc):
+                        raise
+                    LOG.warning("[HTTP1-FALLBACK] page %s after %s", url, type(exc).__name__)
+                    return await self._fetch_page_once(url, await self._http1())
+            except Exception as exc:  # noqa: BLE001 - normalized at the HTTP boundary.
+                if not _retryable_transport_error(exc):
+                    raise
                 if attempt >= self.config.crawl.retry_count:
                     return FetchResult(original_url=url, final_url=url, error=f"{type(exc).__name__}: {exc}")
                 await asyncio.sleep(self.config.crawl.retry_backoff_seconds * (2**attempt))
         return FetchResult(original_url=url, final_url=url, error="unreachable")
 
-    async def _fetch_page_once(self, url: str) -> FetchResult:
+    async def _fetch_page_once(self, url: str, client: httpx.AsyncClient) -> FetchResult:
         result = FetchResult(original_url=url)
         current = url
         for _ in range(self.config.crawl.max_redirects + 1):
@@ -281,8 +343,8 @@ class SafeHTTPClient:
                 result.final_url = current
                 result.blocked_reason = reason
                 return result
-            request = self.client.build_request("GET", current)
-            response = await self.client.send(request, stream=True)
+            request = client.build_request("GET", current)
+            response = await client.send(request, stream=True)
             response_headers = {key.lower(): value for key, value in response.headers.items()}
             result.status_code = response.status_code
             result.headers = response_headers
@@ -333,6 +395,23 @@ class SafeHTTPClient:
             return result
         result.error = "maximum redirect count exceeded"
         return result
+
+
+def _needs_http1_fallback(exc: Exception) -> bool:
+    exception_type = type(exc)
+    return (
+        isinstance(exc, httpx.RemoteProtocolError | httpx.LocalProtocolError)
+        or exception_type.__name__ in {"InvalidBodyLengthError", "ProtocolError"}
+        or exception_type.__module__.startswith("h2.")
+    )
+
+
+def _retryable_transport_error(exc: Exception) -> bool:
+    return (
+        isinstance(exc, httpx.HTTPError | OSError)
+        or _needs_http1_fallback(exc)
+        or type(exc).__module__.startswith("httpcore.")
+    )
 
 
 class HostRateLimiter:

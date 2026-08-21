@@ -63,3 +63,16 @@ def test_artifact_hash_is_separate_from_payload_hash(app_config) -> None:
     assert digest in fingerprints["artifact_hash"]
     assert digest not in fingerprints["hash"]
     assert f'"{digest}"' in generate_queries(app_config)
+
+
+def test_actor_and_incident_terms_are_case_driven_search_pivots(app_config) -> None:
+    app_config.case.actor_aliases = ["Example Actor"]
+    app_config.case.incident_terms = ["50,000 records"]
+
+    fingerprints = initial_fingerprints(app_config.case)
+    queries = generate_queries(app_config)
+
+    assert "Example Actor" in fingerprints["alias"]
+    assert "50,000 records" in fingerprints["phrase"]
+    assert '"Example Actor" "Example Dataset"' in queries
+    assert '"50,000 records"' in queries

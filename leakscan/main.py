@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .bootstrap import CatalogBootstrapper
-from .config import generate_queries, load_config, load_dotenv
+from .config import AppConfig, generate_queries, load_config, load_dotenv
 from .crawler import Crawler
 from .database import CaseDatabase
 from .providers import build_providers
@@ -114,9 +114,10 @@ def _configure_logging(output: Path, verbose: bool) -> None:
     logging.Formatter.converter = __import__("time").gmtime
 
 
-def _provider_availability() -> dict[str, str]:
+def _provider_availability(config: AppConfig) -> dict[str, str]:
     output = {}
     for name, provider in build_providers().items():
+        provider.configure(config)
         available, reason = provider.available()
         output[name] = "available" if available else reason
     return output
@@ -135,7 +136,7 @@ async def _execute(args) -> int:
     prepare_output(config)
     _configure_logging(config.output_dir, args.verbose)
     selected_providers = args.provider or config.search.providers
-    availability = _provider_availability()
+    availability = _provider_availability(config)
     if args.dry_run:
         write_manifest(config, args.command, selected_providers, True, availability)
         LOG.info("[DRY-RUN] case=%s", config.case.name)

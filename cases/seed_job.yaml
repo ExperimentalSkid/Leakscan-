@@ -18,6 +18,19 @@ case:
     - CNSS-Morocco
     - Caisse Nationale de Securite Sociale Maroc
   translated_descriptors: []
+  actor_aliases:
+    - Jabaroot DZ
+    - JabaRoot
+    - 3N16M4
+  incident_terms:
+    - "53,576 PDF files"
+    - "54,000 files"
+    - "500,000 companies"
+    - "2 million affiliates"
+    - "8 April 2025"
+  # Add only independently validated public preview URLs. The original incident
+  # channel was disabled, and similarly named replacement accounts are unverified.
+  public_channels: []
   exclusion_terms: []
   artifacts:
     - source: hybrid_analysis

@@ -1,7 +1,7 @@
 from importlib import resources
 
 from leakscan import __version__
-from leakscan.main import _apply_overrides, build_parser
+from leakscan.main import _apply_overrides, _provider_availability, build_parser
 
 
 def test_version_matches_release() -> None:
@@ -35,3 +35,11 @@ def test_cli_accepts_explicit_search_breadth(app_config) -> None:
     assert app_config.search.minimum_queries_before_plateau == 60
     assert app_config.search.stop_after_stale_queries == 20
     assert app_config.search.max_result_pages_per_query == 7
+
+
+def test_provider_availability_uses_case_scoped_configuration(app_config) -> None:
+    app_config.case.public_channels = ["https://t.me/s/ExampleChannel"]
+
+    availability = _provider_availability(app_config)
+
+    assert availability["telegram_public"] == "available"

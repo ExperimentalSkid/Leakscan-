@@ -22,7 +22,7 @@ provider search --new canonical URL--> immediate bounded crawler/verifier
 
 - `config.py` loads and validates case and runtime settings.
 - `catalogs.py` parses public listing pages into normalized observations.
-- `providers/` isolates general web search, web archives, uploaded-item/file manifests, dataset hubs, release/package assets, global news, code search, sandbox metadata, and public-exposure indexes.
+- `providers/` isolates general web search, web archives, uploaded-item/file manifests, dataset hubs, release/package assets, global news, case-configured public channel previews, code search, sandbox metadata, and public-exposure indexes.
 - `search.py` classifies queries by provider capability and applies native pagination, HTTP-boundary request accounting, an adaptive ceiling and plateau detector, host-level throttling, request deduplication, immediate candidate verification, persisted rate-limit cooldowns, and per-provider circuit breakers.
 - `crawler.py` manages the bounded crawl queue and requires case correlation before following generic archive links.
 - `parser.py` extracts reusable pivots from HTML and text.
@@ -45,4 +45,4 @@ Every actual provider HTTP request passes through a persistent request meter bef
 
 The queue is depth-limited, relevance-gated, deduplicated by canonical URL, and constrained by per-host throttling and configurable concurrency. Broad provider observations are preserved, while archive/action links require case correlation before traversal. Binary responses are rejected. Recognized host objects use public metadata APIs; other correlated archive-like URLs use bodyless probes. Redirect destinations are revalidated against the public-network boundary. Robots rules use bounded retrieval and a 24-hour in-memory cache; server/network failures fail closed.
 
-Host-native metadata can establish `LIVE_METADATA_ONLY`, `LIVE_RESTRICTED`, `TAKEN_DOWN`, or `DEAD`. Responsive HTML routes are explicitly `LISTING_LIVE` or `DOWNLOAD_ROUTE_LIVE`; neither establishes payload availability. Search/index observations alone remain `UNVERIFIED` and never establish live availability.
+Host-native metadata can establish `LIVE_METADATA_ONLY`, `LIVE_RESTRICTED`, `TAKEN_DOWN`, or `DEAD`. Explicit host HTML notices that an object is unauthorized, abuse-reported, or unavailable for download can also establish `TAKEN_DOWN` while preserving the live reference page. Other responsive HTML routes are explicitly `LISTING_LIVE` or `DOWNLOAD_ROUTE_LIVE`; neither establishes payload availability. Search/index observations alone remain `UNVERIFIED` and never establish live availability. Malformed HTTP/2 responses receive one HTTP/1.1 fallback attempt, and unexpected per-candidate exceptions are recorded without terminating the remaining queue.

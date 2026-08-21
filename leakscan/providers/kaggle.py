@@ -31,7 +31,7 @@ class KaggleProvider(SearchProvider):
                 "https://www.kaggle.com/api/v1/datasets/list",
                 params={
                     "group": "public",
-                    "sortBy": "lastUpdated",
+                    "sortBy": "updated",
                     "search": query_anchor(query),
                     "page": page,
                     "pageSize": page_size,

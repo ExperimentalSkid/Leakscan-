@@ -22,7 +22,7 @@ search:
     - arquivo_pt
     - gdelt
     - urlscan
-    - brave
+    - telegram_public
     - google
     - mojeek
     - searxng

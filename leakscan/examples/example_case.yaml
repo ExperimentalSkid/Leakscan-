@@ -15,4 +15,7 @@ case:
   aliases:
     - Example_Dataset
   translated_descriptors: []
+  actor_aliases: []
+  incident_terms: []
+  public_channels: []
   exclusion_terms: []

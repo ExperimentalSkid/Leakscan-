@@ -68,6 +68,8 @@ class SearchEngine:
         self.config = config
         self.database = database
         self.providers = build_providers()
+        for provider in self.providers.values():
+            provider.configure(config)
         self.transport = transport
 
     async def run(

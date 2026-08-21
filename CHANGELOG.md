@@ -4,6 +4,13 @@ All notable changes to Leakscan are documented here.
 
 ## Unreleased
 
+- Removed Brave from the provider registry, defaults, examples, and credential template.
+- Added case-scoped public Telegram preview monitoring that records matching posts, attachment metadata, and outgoing links without downloading attachments.
+- Added actor aliases and incident terms as generic case fingerprints and combined actor/target queries.
+- Added authenticated urlscan Result API request-graph metadata with bounded free-account lookups and no stored-response retrieval.
+- Classified explicit BiteBlob abuse/unauthorized/no-download notices as `TAKEN_DOWN` even when the listing HTML returns 200.
+- Added HTTP/1.1 fallback for malformed HTTP/2 responses and per-candidate exception isolation.
+- Treated Common Crawl 404 responses as empty capture sets and corrected Kaggle's public dataset sort parameter.
 - Counted and enforced provider budgets at the actual HTTP-request boundary, including pagination and manifest lookups.
 - Added bounded native pagination with focused/balanced/broad depths of one, three, and five result pages.
 - Added source-aware query capabilities so archives, news, sandboxes, exposure indexes, and repository catalogs receive useful query shapes instead of every global mutation.

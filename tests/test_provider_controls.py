@@ -164,7 +164,8 @@ def test_archive_index_extracts_identifier_from_site_query(provider: SearchProvi
 
 
 @pytest.mark.asyncio
-async def test_urlscan_escapes_reserved_characters_and_records_quota_reset() -> None:
+async def test_urlscan_escapes_reserved_characters_and_records_quota_reset(monkeypatch) -> None:
+    monkeypatch.delenv("URLSCAN_API_KEY", raising=False)
     queries: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -182,7 +183,68 @@ async def test_urlscan_escapes_reserved_characters_and_records_quota_reset() -> 
 
     assert r"Example\-Archive.7z" in queries[0]
     assert "task.url" in queries[0]
+    assert "filename" in queries[0]
     assert provider.consume_rate_limit_cooldown() == 17
+
+
+@pytest.mark.asyncio
+async def test_urlscan_authenticated_result_metadata_finds_correlated_request(monkeypatch) -> None:
+    monkeypatch.setenv("URLSCAN_API_KEY", "free-account-key")
+    paths: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        assert request.headers["api-key"] == "free-account-key"
+        if request.url.path == "/api/v1/search/":
+            return httpx.Response(200, json={"results": [{
+                "_id": "01965552-2d9a-73e7-905a-5b370c722afa",
+                "page": {"url": "https://listing.example/item", "title": "Example Archive"},
+                "task": {"url": "https://listing.example/item", "time": "2025-01-02T03:04:05Z"},
+            }]}, request=request)
+        return httpx.Response(200, json={
+            "task": {"time": "2025-01-02T03:04:05Z"},
+            "data": {"requests": [{
+                "request": {"request": {"url": "https://mirror.example/files/Example-Archive.7z"}},
+                "response": {"response": {
+                    "status": 200,
+                    "mimeType": "application/x-7z-compressed",
+                    "hash": "a" * 64,
+                    "headers": [
+                        {"name": "Content-Disposition", "value": 'attachment; filename="Example-Archive.7z"'},
+                        {"name": "Content-Length", "value": "1234"},
+                    ],
+                }},
+            }]},
+        }, request=request)
+
+    provider = URLScanProvider()
+    provider.max_result_pages_per_query = 3
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = await provider.search(client, '"Example-Archive.7z"', 10)
+
+    assert paths == [
+        "/api/v1/search/",
+        "/api/v1/result/01965552-2d9a-73e7-905a-5b370c722afa/",
+    ]
+    assert results[0].url == "https://mirror.example/files/Example-Archive.7z"
+    assert results[0].metadata["size"] == 1234
+    assert results[0].metadata["archive_body_bytes_read"] == 0
+
+
+@pytest.mark.asyncio
+async def test_commoncrawl_404_means_no_captures() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/collinfo.json":
+            return httpx.Response(200, json=[{
+                "cdx-api": "https://index.commoncrawl.org/CC-MAIN-test-index"
+            }], request=request)
+        return httpx.Response(404, text="No Captures found", request=request)
+
+    provider = CommonCrawlProvider()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        results = await provider.search(client, '"Example Archive.7z"', 10)
+
+    assert results == []
 
 
 @pytest.mark.asyncio

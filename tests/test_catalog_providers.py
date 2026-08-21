@@ -78,6 +78,7 @@ async def test_kaggle_searches_file_lists_without_download() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
         if request.url.path == "/api/v1/datasets/list":
+            assert request.url.params["sortBy"] == "updated"
             return httpx.Response(200, json=[{
                 "ref": "owner/example-data",
                 "title": "Example data",

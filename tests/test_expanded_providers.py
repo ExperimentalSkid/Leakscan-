@@ -264,4 +264,6 @@ def test_provider_registry_contains_expanded_sources() -> None:
     assert {
         "archive_org_items", "archive_org_files", "arquivo_pt", "gdelt", "searxng", "mojeek",
         "github_releases", "gitlab_assets", "huggingface", "kaggle", "hybrid_analysis", "leakix",
+        "telegram_public",
     } <= set(build_providers())
+    assert "brave" not in build_providers()

@@ -112,3 +112,9 @@ def test_biteblob_html_routes_do_not_claim_a_live_file() -> None:
     assert reference_route_classification(
         "https://biteblob.com/Download/object-id", 200, "application/octet-stream"
     ) == ""
+    assert reference_route_classification(
+        "https://biteblob.com/Information/object-id",
+        200,
+        "text/html",
+        "Link Unauthorized; Reported as abuse material. No download available.",
+    ) == "TAKEN_DOWN"

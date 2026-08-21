@@ -7,7 +7,6 @@ from .archive_org_files import ArchiveOrgFilesProvider
 from .archive_org_items import ArchiveOrgItemsProvider
 from .arquivo_pt import ArquivoPtProvider
 from .base import SearchProvider
-from .brave import BraveProvider
 from .commoncrawl import CommonCrawlProvider
 from .duckduckgo import DuckDuckGoProvider
 from .gdelt import GDELTProvider
@@ -21,6 +20,7 @@ from .leakix import LeakIXProvider
 from .mojeek import MojeekProvider
 from .search_apis import BingProvider, GitLabProvider, GoogleProvider, OTXProvider, VirusTotalProvider
 from .searxng import SearXNGProvider
+from .telegram_public import TelegramPublicProvider
 from .urlscan import URLScanProvider
 
 
@@ -28,7 +28,7 @@ def build_providers() -> dict[str, SearchProvider]:
     instances: list[SearchProvider] = [
         DuckDuckGoProvider(), CommonCrawlProvider(), ArchiveOrgProvider(), ArchiveOrgItemsProvider(),
         ArchiveOrgFilesProvider(), ArquivoPtProvider(), GDELTProvider(), URLScanProvider(),
-        BraveProvider(), BingProvider(), GoogleProvider(), MojeekProvider(), SearXNGProvider(),
+        TelegramPublicProvider(), BingProvider(), GoogleProvider(), MojeekProvider(), SearXNGProvider(),
         GitHubProvider(), GitHubReleasesProvider(), GitLabProvider(), GitLabAssetsProvider(),
         HuggingFaceProvider(), KaggleProvider(), HybridAnalysisProvider(), LeakIXProvider(),
         VirusTotalProvider(), OTXProvider(),

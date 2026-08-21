@@ -39,7 +39,8 @@ class CommonCrawlProvider(SearchProvider):
             index_url,
             params={"url": pattern, "output": "json", "filter": "status:200", "collapse": "urlkey", "pageSize": limit},
         )
-        if response.status_code == 400:
+        # The CDX server uses 404 for a valid query with no captures.
+        if response.status_code in {400, 404}:
             return []
         response.raise_for_status()
         results: list[SearchResult] = []

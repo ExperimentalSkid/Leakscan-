@@ -92,7 +92,12 @@ def host_metadata_classification(provider: str, status_code: int | None, metadat
     return "UNKNOWN"
 
 
-def reference_route_classification(url: str, status_code: int | None, content_type: str) -> str:
+def reference_route_classification(
+    url: str,
+    status_code: int | None,
+    content_type: str,
+    page_text: str = "",
+) -> str:
     """Classify responsive host routes without implying that an archive payload is live."""
     if status_code is None or not 200 <= status_code < 400 or "html" not in content_type.casefold():
         return ""
@@ -100,6 +105,16 @@ def reference_route_classification(url: str, status_code: int | None, content_ty
     hostname = (parts.hostname or "").casefold()
     if hostname not in BITEBLOB_HOSTS:
         return ""
+    normalized_text = " ".join(page_text.casefold().split())
+    takedown_signals = (
+        "reported as abuse material",
+        "no download available",
+        "link unauthorized",
+        "removed for abuse",
+        "removed due to abuse",
+    )
+    if any(signal in normalized_text for signal in takedown_signals):
+        return "TAKEN_DOWN"
     if BITEBLOB_INFORMATION_PATH.match(parts.path):
         return "LISTING_LIVE"
     if BITEBLOB_DOWNLOAD_PATH.match(parts.path):

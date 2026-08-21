@@ -10,12 +10,15 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from time import monotonic
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote
 
 import httpx
 
 from ..models import SearchBatch, SearchResult
+
+if TYPE_CHECKING:
+    from ..config import AppConfig
 
 DEFAULT_ARCHIVE_EXTENSIONS = (
     ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".7z.001", ".zip.001",
@@ -57,6 +60,10 @@ class SearchProvider(ABC):
     # shapes their native index handles well instead of receiving every global
     # mutation generated for a case.
     query_capabilities: frozenset[str] | None = None
+
+    def configure(self, config: AppConfig) -> None:
+        """Bind case/runtime context for providers that need case-scoped sources."""
+        self.config = config
 
     def available(self) -> tuple[bool, str]:
         if self.api_key_env and not os.getenv(self.api_key_env):

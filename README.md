@@ -79,6 +79,9 @@ case:
   distinctive_phrases: ["Example Dataset"]
   aliases: ["Example_Dataset"]
   translated_descriptors: []
+  actor_aliases: []
+  incident_terms: []
+  public_channels: []
   exclusion_terms: []
   artifacts:
     - source: public_sandbox
@@ -92,14 +95,14 @@ case:
       notes: "Hash identifies the HTML/report artifact, not the target archive."
 ```
 
-`auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic. Optional `artifacts` entries preserve known sandbox/report provenance and keep page, URL-shortcut, and related-analysis hashes separate from archive payload hashes.
+`auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic. Optional `actor_aliases` and `incident_terms` expand event-focused searches. `public_channels` accepts only explicitly configured public Telegram preview URLs; it never selects channels on its own or downloads attachments. Optional `artifacts` entries preserve known sandbox/report provenance and keep page, URL-shortcut, and related-analysis hashes separate from archive payload hashes.
 
 ## Discovery providers
 
-- No key required: DuckDuckGo HTML, Common Crawl, Internet Archive CDX, Internet Archive item search and file manifests, Arquivo.pt full-text history, GDELT global news, urlscan public API, Hugging Face Hub metadata, Kaggle public dataset metadata, GitLab public release/package metadata, and AlienVault OTX public indicator lookup.
-- Optional credentials or operator endpoint: Brave, Google Programmable Search, Mojeek, SearXNG, GitHub code and release assets, authenticated GitLab search, Hybrid Analysis, LeakIX, urlscan, VirusTotal, OTX, Hugging Face, and Kaggle. Hugging Face and Kaggle can inspect public records without credentials but accept `HF_TOKEN` or `KAGGLE_USERNAME`/`KAGGLE_KEY` for authenticated quota.
+- No key required: DuckDuckGo HTML, Common Crawl, Internet Archive CDX, Internet Archive item search and file manifests, Arquivo.pt full-text history, GDELT global news, urlscan public search, explicitly configured public Telegram previews, Hugging Face Hub metadata, Kaggle public dataset metadata, GitLab public release/package metadata, and AlienVault OTX public indicator lookup.
+- Optional credentials or operator endpoint: Google Programmable Search, Mojeek, SearXNG, GitHub code and release assets, authenticated GitLab search, Hybrid Analysis, LeakIX, urlscan, VirusTotal, OTX, Hugging Face, and Kaggle. A free urlscan account key enables bounded Result API request-graph metadata. Hugging Face and Kaggle can inspect public records without credentials but accept `HF_TOKEN` or `KAGGLE_USERNAME`/`KAGGLE_KEY` for authenticated quota.
 
-The provider names are `duckduckgo`, `commoncrawl`, `archive_org`, `archive_org_items`, `archive_org_files`, `arquivo_pt`, `gdelt`, `urlscan`, `brave`, `google`, `mojeek`, `searxng`, `github`, `github_releases`, `gitlab`, `gitlab_assets`, `huggingface`, `kaggle`, `hybrid_analysis`, `leakix`, `virustotal`, and `otx`. Use repeated `--provider NAME` options to run a subset. The legacy `bing` adapter remains discoverable only to explain that Microsoft retired the Bing Search APIs on 11 August 2025; it is disabled and is no longer in the default provider list.
+The provider names are `duckduckgo`, `commoncrawl`, `archive_org`, `archive_org_items`, `archive_org_files`, `arquivo_pt`, `gdelt`, `urlscan`, `telegram_public`, `google`, `mojeek`, `searxng`, `github`, `github_releases`, `gitlab`, `gitlab_assets`, `huggingface`, `kaggle`, `hybrid_analysis`, `leakix`, `virustotal`, and `otx`. Use repeated `--provider NAME` options to run a subset. Brave is not included. The legacy `bing` adapter remains discoverable only to explain that Microsoft retired the Bing Search APIs on 11 August 2025; it is disabled and is no longer in the default provider list.
 
 `SEARXNG_URL` must point to an instance controlled or explicitly selected by the operator; Leakscan never chooses a random public instance. `SEARXNG_BEARER_TOKEN` is optional. Mojeek uses `MOJEEK_API_KEY`, Hybrid Analysis uses `HYBRID_ANALYSIS_API_KEY`, and LeakIX uses `LEAKIX_API_KEY`. Hybrid Analysis performs only the documented filename/hash search operations, never invokes submission or sample-download endpoints, and enforces a 12-second minimum interval between searches for the restricted-key quota. LeakIX searches the `leak` scope and emits only web-service URLs that can receive the same bounded current-existence check as other candidates.
 
@@ -111,7 +114,7 @@ Search filtering is controlled by `search.safe_search` in the bundled defaults o
 
 Catalog providers never download file bodies. Internet Archive manifests emit the item identifier, exact filename, size, format, and published MD5/SHA-1 values. Hugging Face emits repository, revision, file path, size, and LFS/blob metadata from Hub API responses. Kaggle emits public dataset and file-list metadata. GitHub and GitLab asset providers retain the repository/project, release or package identifier, filename, size, and available digest fields as the detection point. Any asset-like URL is still passed through Leakscan's normal bodyless verification boundary before it can receive a current-live classification.
 
-URLScan queries escape its reserved query-string characters and use the provider's remaining/reset headers to pause before another request would exceed quota. Compound, split, disk-image, and less-common archive forms such as `.tar.zst`, `.7z.001`, `.zip.001`, `.part1.rar`, `.cab`, and `.iso` are configurable alongside ordinary archive suffixes.
+URLScan queries escape its reserved query-string characters and search requested-URL metadata in addition to page/task URLs and titles. When `URLSCAN_API_KEY` is configured, Leakscan reads a bounded number of Result API HTTP-transaction records and extracts only correlated URL, status, MIME, filename, size, and response-hash metadata; it never requests stored response or file bodies. Public Telegram monitoring reads only case-configured `t.me/s/...` previews, preserves matching post provenance and outgoing links, and records attachment names/sizes without retrieving attachments. Compound, split, disk-image, and less-common archive forms such as `.tar.zst`, `.7z.001`, `.zip.001`, `.part1.rar`, `.cab`, and `.iso` are configurable alongside ordinary archive suffixes.
 
 To customize runtime behavior, copy `settings.example.yaml` and pass it with `--settings`:
 
@@ -137,9 +140,9 @@ A URL ending in an archive extension is not sufficient target evidence. The craw
 - `DOWNLOAD_ROUTE_LIVE`: a download-labelled HTML route responds, but no file metadata was established.
 - `CURRENT_REFERENCE_ONLY`, `UNVERIFIED`, and `BLOCKED`: never claims that a live file was confirmed.
 
-Pixeldrain `/u/{id}` candidates are verified through the documented `/api/file/{id}/info` endpoint. Leakscan preserves stable object metadata while reading no archive bytes. Other hosts continue to use bodyless `HEAD` or one-byte range probes.
+Pixeldrain `/u/{id}` candidates are verified through the documented `/api/file/{id}/info` endpoint. Leakscan preserves stable object metadata while reading no archive bytes. BiteBlob information/download pages that explicitly say an object was reported for abuse, is unauthorized, or has no download available are classified `TAKEN_DOWN` even when the informational HTML still returns HTTP 200. Other hosts continue to use bodyless `HEAD` or one-byte range probes.
 
-Archive-like URLs use `HEAD`. If `HEAD` is unsupported, Leakscan sends a one-byte range request in streaming mode and closes it without consuming the body. Unexpected binary headers or signatures stop page retrieval immediately. Robots rules are cached for at most 24 hours; robots server/network failures fail closed. Operators remain responsible for authorization, applicable law, provider terms, and handling sensitive evidence.
+Archive-like URLs use `HEAD`. If `HEAD` is unsupported, Leakscan sends a one-byte range request in streaming mode and closes it without consuming the body. Malformed HTTP/2 protocol/body responses receive one HTTP/1.1 fallback attempt, and every candidate is isolated so one non-compliant server cannot terminate the whole run. Unexpected binary headers or signatures stop page retrieval immediately. Robots rules are cached for at most 24 hours; robots server/network failures fail closed. Operators remain responsible for authorization, applicable law, provider terms, and handling sensitive evidence.
 
 Generated SQLite state, logs, findings, reports, and evidence are ignored by the repository's standard output patterns. Keep sensitive cases and outputs outside a source checkout whenever possible, and inspect `git status` before every commit.
 

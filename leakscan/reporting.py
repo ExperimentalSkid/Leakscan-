@@ -86,7 +86,7 @@ def write_manifest(
 
 
 def _csv_value(value: Any) -> Any:
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list | dict):
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return value
 
@@ -545,6 +545,9 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         f"- Item IDs: {', '.join(f'`{value}`' for value in case.item_ids) or 'Not supplied'}",
         f"- Reported filenames: {', '.join(f'`{value}`' for value in case.filenames) or 'Not supplied'}",
         f"- Reported sizes: {', '.join(f'`{value}`' for value in case.reported_sizes) or 'Not supplied'}",
+        f"- Actor aliases: {', '.join(f'`{value}`' for value in case.actor_aliases) or 'Not supplied'}",
+        f"- Incident terms: {', '.join(f'`{value}`' for value in case.incident_terms) or 'Not supplied'}",
+        f"- Public channel previews: {', '.join(f'<{value}>' for value in case.public_channels) or 'Not supplied'}",
         *(f"- Seed listing: <{seed.url}> (`{seed.adapter}` adapter)" for seed in case.seeds), "",
         *(
             f"- Labelled `{artifact.artifact_type}` reference: <{artifact.report_url}> "
