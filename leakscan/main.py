@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
@@ -213,6 +214,22 @@ async def _execute(args) -> int:
         write_manifest(config, args.command, selected_providers, False, availability, database)
         LOG.info("[DONE] %s", database.stats())
         if args.command in {"all", "report"}:
+            overview_path = config.output_dir / "overview.json"
+            if overview_path.exists():
+                overview = json.loads(overview_path.read_text(encoding="utf-8"))
+                counts = overview.get("counts", {})
+                LOG.info(
+                    "[OVERVIEW] candidates=%s live=%s restricted=%s references=%s "
+                    "taken_down=%s dead=%s unresolved=%s",
+                    counts.get("unique_candidates", 0),
+                    counts.get("live_metadata_only", 0),
+                    counts.get("live_restricted", 0),
+                    counts.get("current_reference_pages", 0),
+                    counts.get("taken_down", 0),
+                    counts.get("dead_or_historical", 0),
+                    counts.get("unresolved_or_blocked", 0),
+                )
+            LOG.info("[OVERVIEW] %s", config.output_dir / "overview.md")
             LOG.info("[REPORT] %s", config.output_dir / "reports" / "analyst_summary.md")
         return 0
     finally:

@@ -15,7 +15,7 @@ The engine contains no organization-specific target logic. Identifiers, filename
 4. Searches independent public sources and immediately verifies each newly unique candidate before continuing.
 5. Repeats discovery when new fingerprints or domains are found.
 6. Verifies recognized file-host objects through public metadata APIs and checks other archive-like candidates from response metadata without retrieving archive bodies.
-7. Exports resumable SQLite state, JSONL/CSV evidence, saved pages, and a Markdown handoff report.
+7. Exports resumable SQLite state, JSONL/CSV evidence, saved pages, a one-page scan overview, and detailed Markdown handoff reports.
 
 ## Install
 
@@ -50,7 +50,7 @@ You can also launch the questions explicitly:
 leakscan wizard
 ```
 
-If you stop with Ctrl+C, Leakscan prints the exact resume command. At completion, it prints the path to `analyst_summary.md`.
+If you stop with Ctrl+C, Leakscan prints the exact resume command. At completion, it prints a terminal count of live, restricted, listing-only, taken-down, dead, and unresolved candidates plus the paths to `overview.md` and `analyst_summary.md`.
 
 Advanced users can still preview or run a hand-written case:
 
@@ -116,7 +116,7 @@ The provider names are `duckduckgo`, `commoncrawl`, `archive_org`, `archive_org_
 
 A provider error or rate limit is isolated and recorded without stopping other providers. The per-host delay applies to provider APIs as well as crawling. Authentication failures open an immediate circuit breaker; rate limits honor `Retry-After` and establish a persisted cooldown; repeated connection or service failures disable that provider for the remainder of the run. Equivalent provider requests are sent once even when several filename variants map to the same API lookup.
 
-Discovery is broad and filtering is strict. Request budgets are enforced at the HTTP boundary: every search page, manifest lookup, repository lookup, and failed request attempt counts, rather than treating a multi-request query as one request. The balanced defaults allow up to 60 actual requests per provider across pivot rounds and resumes, guarantee a 45-request discovery floor where the provider supports that many distinct searches, and then stop a provider after 10 consecutive query groups find no new canonical URL. `--search-profile focused`, `balanced`, and `broad` select ceilings/floors/stale windows/result-page depths of `15/15/5/1`, `60/45/10/3`, and `120/60/20/5`. `--max-provider-requests` overrides the ceiling, zero disables that ceiling, and `--max-result-pages-per-query` overrides native pagination depth. A query interrupted by the hard request ceiling remains pending for a later run with additional budget. Provider rate-limit headers, cooldowns, failure circuits, per-host delays, and the global crawl bounds remain authoritative.
+Discovery is broad and filtering is strict. In addition to exact names, slugs, identifiers, hashes, and extension mutations, Leakscan derives a bounded set of three-to-five-word filename/alias fragments and relaxed all-token queries. These catch mirrors that shorten punctuation, omit a prefix/suffix, or rename an archive while avoiding the noisy single-word searches that create huge unrelated result sets. A partial fragment receives less weight than an exact filename and becomes likely only when combined with archive-like evidence or another case fingerprint. Request budgets are enforced at the HTTP boundary: every search page, manifest lookup, repository lookup, and failed request attempt counts, rather than treating a multi-request query as one request. The balanced defaults allow up to 60 actual requests per provider across pivot rounds and resumes, guarantee a 45-request discovery floor where the provider supports that many distinct searches, and then stop a provider after 10 consecutive query groups find no new canonical URL. `--search-profile focused`, `balanced`, and `broad` select ceilings/floors/stale windows/result-page depths of `15/15/5/1`, `60/45/10/3`, and `120/60/20/5`. `--max-provider-requests` overrides the ceiling, zero disables that ceiling, and `--max-result-pages-per-query` overrides native pagination depth. A query interrupted by the hard request ceiling remains pending for a later run with additional budget. Provider rate-limit headers, cooldowns, failure circuits, per-host delays, and the global crawl bounds remain authoritative.
 
 Search filtering is controlled by `search.safe_search` in the bundled defaults or a custom settings file; the default requests unfiltered results from providers that support that option. Leakscan starts with exact filenames, filename slugs, object IDs, and every configured archive-extension mutation, then expands through labelled hashes, known URLs, phrases, aliases, sizes, intent terms, and discovered pivots. A source-aware planner classifies those queries and sends only useful shapes to native indexes: archives receive filenames/URLs/IDs, news receives phrases and incident terms, sandboxes receive filenames/hashes, and repository catalogs receive filenames, IDs, and descriptive phrases. General web engines still receive the broad set. URLScan skips bare hash searches because its selected fields cover URLs and page titles rather than file metadata.
 
@@ -132,7 +132,7 @@ leakscan all --case cases\example.yaml --settings settings.example.yaml --output
 
 ## Evidence and safety model
 
-SQLite stores pending and visited URLs, provider queries, extracted pivots, relationships, domains, and observations. Relevant HTML/text pages are saved by SHA-256. Catalog metadata and archive response metadata are written under `evidence/metadata/`. The report phase regenerates CSV, JSONL, and Markdown artifacts.
+SQLite stores pending and visited URLs, provider queries, extracted pivots, relationships, domains, and observations. Relevant HTML/text pages are saved by SHA-256. Catalog metadata and archive response metadata are written under `evidence/metadata/`. The report phase regenerates CSV, JSONL, and Markdown artifacts. `overview.md` is the first file to open after a run; `overview.json` contains the same headline counts and top candidates for automation.
 
 `candidate_urls.csv` contains one authoritative row per canonical, case-correlated target candidate URL. `detection_points.csv` records where each candidate was first detected and how it was most recently verified: provider, exact query, provider record URL and ID, provider timestamp, verification method and endpoint, host object ID, verified filename/size/SHA-256, and local timestamps. Current direct observations override historical index records. `artifact_references.csv` separately records operator-labelled sandbox, URL-shortcut, and analysis references. `supporting_references.csv` records provider-discovered news and analysis pages. Both reference classes can yield tightly correlated outgoing links, but neither inflates target candidate or live-file counts.
 

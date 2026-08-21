@@ -14,7 +14,7 @@ from .domains import inspect_domain, parent_domain
 from .host_verifiers import reference_route_classification
 from .http import SafeHTTPClient
 from .models import Finding
-from .parser import context_excerpt
+from .parser import context_excerpt, parse_page
 from .scoring import classify, has_case_correlation, score_candidate
 from .utils.time import utc_now
 from .utils.urls import filename_from_url, hostname_for, normalize_url
@@ -99,6 +99,11 @@ class CatalogBootstrapper:
             return False
 
         adapter = adapter_for(seed)
+        parsed_page = parse_page(
+            fetch.body,
+            fetch.final_url or normalized,
+            fetch.headers.get("content-type", ""),
+        )
         record = adapter.parse(fetch.body, fetch.final_url or normalized, fetch.headers.get("content-type", ""), self.config)
         seed_fragment = unquote(urlsplit(seed.url).fragment)
         if seed_fragment and any(seed_fragment.lower().endswith(ext.lower()) for ext in self.config.safety.archive_extensions):
@@ -175,6 +180,7 @@ class CatalogBootstrapper:
                 record.source_url,
                 fetch.status_code,
                 fetch.headers.get("content-type", ""),
+                parsed_page.text,
             ) or classify(scored.score, self.config, fetch.status_code),
             first_seen=now, last_checked=now,
             notes=f"Directly observed public catalog metadata via {adapter.name}; archive body not requested.",

@@ -27,11 +27,11 @@ provider search --new canonical URL--> immediate bounded crawler/verifier
 - `search.py` classifies queries by provider capability and applies native pagination, HTTP-boundary request accounting, an adaptive ceiling and plateau detector, host-level throttling, request deduplication, immediate candidate verification, persisted rate-limit cooldowns, and per-provider circuit breakers.
 - `crawler.py` manages the bounded crawl queue and requires case correlation before following generic archive links.
 - `parser.py` extracts reusable pivots from HTML and text.
-- `scoring.py` correlates observations against the evolving fingerprint set.
+- `scoring.py` correlates observations against the evolving fingerprint set, including bounded multi-word partial-name evidence at lower weight than exact identifiers.
 - `verifier.py` records response metadata for archive-like candidates without consuming their bodies.
 - `host_verifiers.py` maps recognized public file-host URLs to bounded metadata endpoints and normalizes stable object fields.
 - `database.py` persists resumable state and evidence relationships.
-- `reporting.py` exports analyst-facing artifacts.
+- `reporting.py` exports analyst-facing artifacts plus a top-level Markdown/JSON overview with availability buckets, strongest detection points, and search coverage.
 - Candidate reporting merges observations by URL, retains the original detection point and latest verification point, and lets the latest direct existence check override historical index claims. Labelled artifacts and provider-discovered supporting references are exported separately from target candidates.
 
 ## Data boundary

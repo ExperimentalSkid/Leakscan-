@@ -1,6 +1,8 @@
 import httpx
 import pytest
 
+from leakscan.bootstrap import CatalogBootstrapper
+from leakscan.config import SeedConfig
 from leakscan.crawler import Crawler
 from leakscan.database import CaseDatabase
 from leakscan.host_verifiers import (
@@ -9,6 +11,7 @@ from leakscan.host_verifiers import (
     reference_route_classification,
 )
 from leakscan.http import SafeHTTPClient
+from leakscan.models import FetchResult
 from leakscan.reporting import _candidate_summaries
 from leakscan.utils.time import utc_now
 
@@ -118,3 +121,43 @@ def test_biteblob_html_routes_do_not_claim_a_live_file() -> None:
         "text/html",
         "Link Unauthorized; Reported as abuse material. No download available.",
     ) == "TAKEN_DOWN"
+
+
+@pytest.mark.asyncio
+async def test_catalog_bootstrap_preserves_biteblob_abuse_notice_as_takedown(
+    app_config,
+    monkeypatch,
+) -> None:
+    seed = SeedConfig(
+        url="https://biteblob.com/Information/abcDEF123/#Example%20Dataset.7z",
+        source="biteblob",
+        adapter="biteblob",
+    )
+    app_config.case.seeds = [seed]
+
+    class FakeHTTP:
+        async def fetch_page(self, url: str) -> FetchResult:
+            return FetchResult(
+                original_url=url,
+                final_url=url,
+                status_code=200,
+                headers={"content-type": "text/html"},
+                body=(
+                    b"<html><body><h1>Link Unauthorized</h1>"
+                    b"<p>Reported as abuse material. No download available.</p>"
+                    b"<p>Example Dataset.7z</p></body></html>"
+                ),
+            )
+
+    async def no_domain_lookup(*_args):
+        return [], {}, ""
+
+    monkeypatch.setattr("leakscan.bootstrap.inspect_domain", no_domain_lookup)
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    try:
+        await CatalogBootstrapper(app_config, database)._process_seed(seed, FakeHTTP())
+        findings = list(database.iter_findings())
+    finally:
+        database.close()
+
+    assert findings[-1].classification == "TAKEN_DOWN"

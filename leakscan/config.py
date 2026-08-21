@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import yaml
 
@@ -245,6 +246,125 @@ def filename_variants(filename: str, archive_extensions: list[str]) -> list[str]
     return list(dict.fromkeys(value for value in variants if value))
 
 
+KEYWORD_STOPWORDS = {
+    "a", "an", "and", "archive", "backup", "data", "database", "dataset", "de", "des",
+    "document", "documents", "du", "dump", "et", "file", "files", "for", "from", "la",
+    "le", "les", "of", "or", "the", "to", "un", "une", "y",
+}
+
+
+def keyword_variants(
+    value: str,
+    archive_extensions: Iterable[str],
+    *,
+    limit: int = 8,
+) -> list[str]:
+    """Return bounded multi-word fragments that survive common mirror renaming."""
+    cleaned = unquote(value).strip()
+    lowered = cleaned.casefold()
+    matched_suffix = next(
+        (
+            extension
+            for extension in sorted(archive_extensions, key=len, reverse=True)
+            if lowered.endswith(extension.casefold())
+        ),
+        "",
+    )
+    if matched_suffix:
+        cleaned = cleaned[:-len(matched_suffix)]
+    tokens = re.findall(r"[^\W_]+", cleaned, flags=re.UNICODE)
+    if len(tokens) < 3:
+        return []
+
+    def is_signal(token: str) -> bool:
+        normalized = token.casefold()
+        if normalized.isdigit():
+            return len(normalized) >= 4
+        return (
+            (token.isupper() and 2 <= len(token) <= 10)
+            or (len(normalized) >= 3 and normalized not in KEYWORD_STOPWORDS)
+        )
+
+    output: list[str] = []
+    maximum_window = min(5, len(tokens) - 1)
+    for window_size in range(maximum_window, 2, -1):
+        for start in range(0, len(tokens) - window_size + 1):
+            window = tokens[start:start + window_size]
+            signal_count = sum(is_signal(token) for token in window)
+            fragment = " ".join(window)
+            if (
+                signal_count >= 2
+                and len(fragment) >= 12
+                and window[0].casefold() not in KEYWORD_STOPWORDS
+                and window[-1].casefold() not in KEYWORD_STOPWORDS
+            ):
+                output.append(fragment)
+            if len(dict.fromkeys(item.casefold() for item in output)) >= limit:
+                return _deduplicate_casefold(output)[:limit]
+    return _deduplicate_casefold(output)[:limit]
+
+
+def keyword_variants_for_values(
+    values: Iterable[str],
+    archive_extensions: Iterable[str],
+    *,
+    limit: int = 24,
+) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        output.extend(keyword_variants(value, archive_extensions))
+        if len(_deduplicate_casefold(output)) >= limit:
+            break
+    return _deduplicate_casefold(output)[:limit]
+
+
+def _deduplicate_casefold(values: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        key = value.casefold()
+        if value and key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
+
+
+def _relaxed_keyword_queries(values: Iterable[str], archive_extensions: Iterable[str]) -> list[str]:
+    output: list[str] = []
+    for value in values:
+        cleaned = unquote(value).strip()
+        lowered = cleaned.casefold()
+        suffix = next(
+            (
+                extension
+                for extension in sorted(archive_extensions, key=len, reverse=True)
+                if lowered.endswith(extension.casefold())
+            ),
+            "",
+        )
+        if suffix:
+            cleaned = cleaned[:-len(suffix)]
+        tokens = re.findall(r"[^\W_]+", cleaned, flags=re.UNICODE)
+        if len(tokens) < 3:
+            continue
+        normalized = " ".join(tokens)
+        output.append(normalized)
+        first_signal = next(
+            (
+                index
+                for index, token in enumerate(tokens)
+                if (token.isupper() and len(token) >= 2)
+                or (len(token) >= 3 and token.casefold() not in KEYWORD_STOPWORDS)
+            ),
+            None,
+        )
+        if first_signal is not None and len(tokens[first_signal + 1:]) >= 2:
+            output.append(
+                f'"{tokens[first_signal]}" "{" ".join(tokens[first_signal + 1:])}"'
+            )
+    return _deduplicate_casefold(output)[:16]
+
+
 def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None = None) -> list[str]:
     values = initial_fingerprints(config.case)
     for kind, entries in (fingerprints or {}).items():
@@ -252,6 +372,13 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
     queries: list[str] = []
     deferred_filename_variants: list[str] = []
     deferred_intent_queries: list[str] = []
+    keyword_sources = sorted(
+        values["filename"] | values["alias"] | set(config.case.distinctive_phrases)
+    )
+    keywords = keyword_variants_for_values(
+        keyword_sources,
+        config.safety.archive_extensions,
+    )
     for filename in sorted(values["filename"]):
         variants = filename_variants(filename, config.safety.archive_extensions)
         stem = variants[1] if len(variants) > 1 else Path(filename).stem
@@ -268,12 +395,15 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
         )
         for term in config.search.intent_terms:
             deferred_intent_queries.append(f'"{stem}" {term}')
+    queries.extend(f'"{keyword}"' for keyword in keywords)
+    queries.extend(_relaxed_keyword_queries(keyword_sources, config.safety.archive_extensions))
     for item_id in sorted(values["item_id"]):
         queries.append(f'"{item_id}"')
         for filename in sorted(values["filename"]):
             suffix = Path(filename).suffix.lstrip(".")
             if suffix:
                 queries.append(f'"{item_id}" "{suffix}"')
+        queries.extend(f'"{item_id}" "{keyword}"' for keyword in keywords[:5])
     # Cover every configured archive extension inside the default discovery
     # floor. Provider request-key deduplication still collapses equivalent
     # archive-index lookups before any network request is made.
@@ -307,7 +437,11 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
     for domain in sorted(values["domain"]):
         queries.extend(f"site:{domain} {item_id}" for item_id in sorted(values["item_id"]))
     for size in sorted(values["size"]):
-        anchors = sorted(values["alias"] | values["phrase"])
+        anchors = list(dict.fromkeys([
+            *sorted(values["filename"]),
+            *sorted(values["alias"] | values["phrase"]),
+            *keywords,
+        ]))
         if anchors:
             queries.extend(f'"{anchor}" "{size}"' for anchor in anchors[:5])
         else:

@@ -4,6 +4,7 @@ from leakscan.config import (
     filename_variants,
     generate_queries,
     initial_fingerprints,
+    keyword_variants,
 )
 
 
@@ -26,6 +27,21 @@ def test_compound_archive_suffix_is_removed_as_one_unit(app_config) -> None:
     assert variants[0] == "Example Dataset.tar.gz"
     assert "Example Dataset.7z" in variants
     assert "Example Dataset.tar.7z" not in variants
+
+
+def test_keyword_expansion_uses_bounded_multiword_fragments(app_config) -> None:
+    filename = "CNSS - Moroccan National Social Security Fund.7z"
+    app_config.case.filenames = [filename]
+
+    fragments = keyword_variants(filename, app_config.safety.archive_extensions)
+    queries = generate_queries(app_config)
+
+    assert "Moroccan National Social Security Fund" in fragments
+    assert "National Social Security Fund" in fragments
+    assert len(fragments) <= 8
+    assert all(len(fragment.split()) >= 3 for fragment in fragments)
+    assert '"Moroccan National Social Security Fund"' in queries
+    assert '"Moroccan"' not in queries
 
 
 def test_user_agent_renders_version_and_sanitized_contact(monkeypatch) -> None:

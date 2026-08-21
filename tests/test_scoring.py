@@ -39,3 +39,18 @@ def test_filename_mutation_matches(app_config):
     mutated = "Example Dataset.zip"
     result = score_candidate(app_config, f"https://example.org/{mutated}", filename=mutated)
     assert any(reason["reason"] == "filename_similarity_above_threshold" for reason in result.reasons)
+
+
+def test_partial_multiword_filename_plus_archive_evidence_is_likely(app_config):
+    app_config.case.filenames = ["Acme International Payroll Records Archive.7z"]
+
+    result = score_candidate(
+        app_config,
+        "https://files.example/International-Payroll-Records.zip",
+        filename="International-Payroll-Records.zip",
+    )
+
+    reasons = {item["reason"] for item in result.reasons}
+    assert "keyword_fragment" in reasons
+    assert "archive_reference" in reasons
+    assert result.score >= app_config.scoring.likely_threshold

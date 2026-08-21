@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from rapidfuzz.fuzz import ratio
 
-from .config import AppConfig, initial_fingerprints
+from .config import AppConfig, initial_fingerprints, keyword_variants_for_values
 from .parser import normalize_size
 from .utils.urls import filename_from_url, looks_like_archive_url
 
@@ -62,6 +64,10 @@ def _merge_fingerprints(config: AppConfig, fingerprints: dict[str, set[str]] | N
     values = initial_fingerprints(config.case)
     for kind, entries in (fingerprints or {}).items():
         values.setdefault(kind, set()).update(entry for entry in entries if entry)
+    values["keyword"] = set(keyword_variants_for_values(
+        values["filename"] | values["alias"] | set(config.case.distinctive_phrases),
+        config.safety.archive_extensions,
+    ))
     return values
 
 
@@ -80,6 +86,7 @@ def score_candidate(
     values = _merge_fingerprints(config, fingerprints)
     combined = f"{url} {title} {context} {filename} {content_disposition}"
     lowered = combined.lower()
+    normalized = re.sub(r"[^\w]+", " ", unquote(combined).casefold()).strip()
     reasons: list[dict[str, Any]] = []
 
     def add(points: int, reason: str, evidence: str = "") -> None:
@@ -117,6 +124,14 @@ def score_candidate(
     matching_aliases = [value for value in values["alias"] if value.lower() in lowered]
     if matching_aliases:
         add(30, "case_alias", matching_aliases[0])
+    matching_keywords = [
+        value
+        for value in values["keyword"]
+        if re.sub(r"[^\w]+", " ", value.casefold()).strip() in normalized
+    ]
+    if not matching_names and not matching_phrases and not matching_aliases and matching_keywords:
+        strongest = max(matching_keywords, key=len)
+        add(35, "keyword_fragment", strongest)
     matching_accounts = [value for value in values["account"] if value.lower() in lowered]
     if matching_accounts:
         add(25, "catalog_account", matching_accounts[0])

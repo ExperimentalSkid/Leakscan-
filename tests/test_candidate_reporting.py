@@ -1,4 +1,5 @@
 import csv
+import json
 
 from leakscan.database import CaseDatabase
 from leakscan.models import Finding
@@ -202,3 +203,12 @@ def test_exports_one_candidate_with_detection_point_and_authoritative_status(app
     summary = (app_config.output_dir / "reports" / "analyst_summary.md").read_text(encoding="utf-8")
     assert "historical/dead: **1**" in summary
     assert "Raw observations" not in summary
+    overview = json.loads((app_config.output_dir / "overview.json").read_text(encoding="utf-8"))
+    overview_markdown = (app_config.output_dir / "overview.md").read_text(encoding="utf-8")
+    assert overview["counts"]["unique_candidates"] == 1
+    assert overview["counts"]["dead_or_historical"] == 1
+    assert overview["counts"]["raw_observations"] == 3
+    assert overview["top_candidates"][0]["detection_provider"] == "public_index"
+    assert "## What the scan caught" in overview_markdown
+    assert "## Strongest detection points" in overview_markdown
+    assert 'query `"Example Archive.7z"`' in overview_markdown

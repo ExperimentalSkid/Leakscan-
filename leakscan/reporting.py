@@ -9,9 +9,10 @@ from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import __version__
-from .config import AppConfig, generate_queries
+from .config import AppConfig, generate_queries, keyword_variants_for_values
 from .database import CaseDatabase
 from .models import Finding
 from .utils.time import utc_now
@@ -216,6 +217,14 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
     )
     _write_discovery_report(config, database, findings)
     _write_analyst_summary(config, database, findings)
+    _write_overview(
+        config,
+        database,
+        findings,
+        candidates,
+        artifact_references,
+        supporting_references,
+    )
     query_records = database.iter_queries()
     (config.output_dir / "queries.txt").write_text(
         "\n".join(
@@ -228,6 +237,200 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
 
 def _display_url(finding: Finding) -> str:
     return finding.final_url or finding.normalized_url or finding.candidate_url or finding.source_url
+
+
+def _write_overview(
+    config: AppConfig,
+    database: CaseDatabase,
+    findings: list[Finding],
+    candidates: list[dict[str, Any]],
+    artifact_references: list[dict[str, Any]],
+    supporting_references: list[dict[str, Any]],
+) -> None:
+    """Write the short operator dashboard used immediately after a scan."""
+    statuses = Counter(item["current_status"] for item in candidates)
+    references = [
+        item for item in candidates
+        if item["current_status"] in {
+            "CURRENT_REFERENCE_ONLY", "LISTING_LIVE", "DOWNLOAD_ROUTE_LIVE"
+        }
+    ]
+    taken_down = [item for item in candidates if item["current_status"] == "TAKEN_DOWN"]
+    dead = [
+        item for item in candidates
+        if item["current_status"] in {"DEAD", "HISTORICAL_DEAD"}
+    ]
+    unresolved = [
+        item for item in candidates
+        if item["current_status"] in {"UNVERIFIED", "UNKNOWN", "BLOCKED"}
+    ]
+    query_records = database.iter_queries()
+    query_statuses = Counter(item["status"] for item in query_records)
+    provider_requests = database.stats().get("provider_requests", {})
+    providers_queried = sorted({item["provider"] for item in query_records})
+    candidate_domains = sorted({
+        (urlsplit(item["candidate_url"]).hostname or "").casefold()
+        for item in candidates
+        if urlsplit(item["candidate_url"]).hostname
+    })
+    keyword_sources = [
+        *config.case.filenames,
+        *config.case.distinctive_phrases,
+        *config.case.aliases,
+        *config.case.translated_descriptors,
+    ]
+    keyword_fragments = keyword_variants_for_values(
+        keyword_sources,
+        config.safety.archive_extensions,
+    )
+    counts = {
+        "raw_observations": len(findings),
+        "unique_candidates": len(candidates),
+        "live_metadata_only": statuses["LIVE_METADATA_ONLY"],
+        "live_restricted": statuses["LIVE_RESTRICTED"],
+        "current_reference_pages": len(references),
+        "taken_down": len(taken_down),
+        "dead_or_historical": len(dead),
+        "unresolved_or_blocked": len(unresolved),
+        "artifact_references": len(artifact_references),
+        "supporting_references": len(supporting_references),
+        "domains": len(candidate_domains),
+        "provider_requests": sum(int(value) for value in provider_requests.values()),
+    }
+    payload = {
+        "generated_at_utc": utc_now(),
+        "case": config.case.name,
+        "bottom_line": _overview_bottom_line(counts),
+        "counts": counts,
+        "status_counts": dict(sorted(statuses.items())),
+        "providers": {
+            "queried": providers_queried,
+            "requests": provider_requests,
+            "query_statuses": dict(sorted(query_statuses.items())),
+        },
+        "search_inputs": {
+            "filenames": config.case.filenames,
+            "item_ids": config.case.item_ids,
+            "unverified_search_hashes": config.case.search_hashes,
+            "phrases": config.case.distinctive_phrases,
+            "aliases": config.case.aliases,
+            "actor_aliases": config.case.actor_aliases,
+            "derived_keyword_fragments": keyword_fragments,
+        },
+        "candidate_domains": candidate_domains,
+        "top_candidates": _overview_sort(candidates)[:15],
+    }
+    (config.output_dir / "overview.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    lines = [
+        f"# Scan overview: {config.case.name}", "",
+        f"Generated: `{payload['generated_at_utc']}`", "",
+        "## Bottom line", "",
+        payload["bottom_line"], "",
+        "## What the scan caught", "",
+        f"- Confirmed live through file metadata: **{counts['live_metadata_only']}**",
+        f"- Confirmed by host metadata but access-restricted: **{counts['live_restricted']}**",
+        f"- Current listings/reference/download pages, not proof of a live file: **{counts['current_reference_pages']}**",
+        f"- Taken down: **{counts['taken_down']}**",
+        f"- Dead or historical: **{counts['dead_or_historical']}**",
+        f"- Unresolved or blocked: **{counts['unresolved_or_blocked']}**",
+        f"- Unique target candidates: **{counts['unique_candidates']}**",
+        f"- Raw observations retained: **{counts['raw_observations']}**", "",
+        "## Strongest detection points", "",
+    ]
+    strongest = _overview_sort(candidates)[:15]
+    if strongest:
+        lines.extend(_overview_candidate_line(item) for item in strongest)
+    else:
+        lines.append("No case-correlated target candidate was recorded.")
+    lines.extend([
+        "", "## Search coverage", "",
+        f"- Providers queried: {', '.join(f'`{value}`' for value in providers_queried) or 'None'}",
+        f"- Actual provider requests: **{counts['provider_requests']}**",
+        f"- Query states: {', '.join(f'`{key}` {value}' for key, value in sorted(query_statuses.items())) or 'None'}",
+        f"- Candidate domains: {', '.join(f'`{value}`' for value in candidate_domains) or 'None'}",
+        f"- Supporting analysis/news references: **{counts['supporting_references']}**",
+        f"- Labelled artifact references: **{counts['artifact_references']}**", "",
+        "## Search fingerprints used", "",
+        f"- Filenames: {', '.join(f'`{value}`' for value in config.case.filenames) or 'Not supplied'}",
+        f"- Object IDs: {', '.join(f'`{value}`' for value in config.case.item_ids) or 'Not supplied'}",
+        f"- Phrases and aliases: {', '.join(f'`{value}`' for value in [*config.case.distinctive_phrases, *config.case.aliases]) or 'Not supplied'}",
+        f"- Derived multi-word fragments: {', '.join(f'`{value}`' for value in keyword_fragments) or 'None'}", "",
+        "Derived fragments are bounded multi-word queries. Single-word filename fragments are not searched.", "",
+        "## Open these next", "",
+        "- `candidate_urls.csv` — one row per unique candidate and its current state.",
+        "- `detection_points.csv` — provider, exact query, record URL, verification method, and timestamps.",
+        "- `reports/analyst_summary.md` — concise evidentiary summary.",
+        "- `reports/discovery_report.md` — complete methodology, queries, relationships, and limitations.",
+        "- `overview.json` — machine-readable copy of this dashboard.", "",
+    ])
+    overview_text = "\n".join(lines)
+    (config.output_dir / "overview.md").write_text(overview_text, encoding="utf-8")
+    (config.output_dir / "reports" / "overview.md").write_text(overview_text, encoding="utf-8")
+
+
+def _overview_bottom_line(counts: dict[str, int]) -> str:
+    live_count = counts["live_metadata_only"] + counts["live_restricted"]
+    if live_count:
+        return (
+            f"The scan found **{live_count}** currently host-confirmed file object(s). "
+            "Review the detection and verification points before any takedown action."
+        )
+    if counts["current_reference_pages"]:
+        return (
+            "No live file object was confirmed. The scan found "
+            f"**{counts['current_reference_pages']}** current listing/reference page(s), which are leads only."
+        )
+    if counts["taken_down"] or counts["dead_or_historical"]:
+        return (
+            "No live file object was confirmed. The available target-correlated locations are "
+            "taken down, dead, or historical."
+        )
+    if counts["unresolved_or_blocked"]:
+        return (
+            "No live file object was confirmed. "
+            f"**{counts['unresolved_or_blocked']}** candidate(s) remain unresolved or blocked."
+        )
+    return "No case-correlated target candidate was found in this run."
+
+
+def _overview_sort(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    priority = {
+        "LIVE_METADATA_ONLY": 0,
+        "LIVE_RESTRICTED": 1,
+        "TAKEN_DOWN": 2,
+        "LISTING_LIVE": 3,
+        "DOWNLOAD_ROUTE_LIVE": 4,
+        "CURRENT_REFERENCE_ONLY": 5,
+        "UNVERIFIED": 6,
+        "BLOCKED": 7,
+        "UNKNOWN": 8,
+        "HISTORICAL_DEAD": 9,
+        "DEAD": 10,
+    }
+    return sorted(
+        candidates,
+        key=lambda item: (
+            priority.get(item["current_status"], 99),
+            -int(item["maximum_score"]),
+            item["candidate_url"],
+        ),
+    )
+
+
+def _overview_candidate_line(item: dict[str, Any]) -> str:
+    filename = item.get("verified_filename") or item.get("filename")
+    name = f" — `{filename}`" if filename else ""
+    provider = item.get("detection_provider") or "unknown provider"
+    query = f"; query `{item['detection_query']}`" if item.get("detection_query") else ""
+    checked = f"; checked `{item['last_checked']}`" if item.get("last_checked") else ""
+    return (
+        f"- `{item['current_status']}`{name} — <{item['candidate_url']}>; "
+        f"score {item['maximum_score']}; detected by `{provider}`{query}{checked}."
+    )
 
 
 def _candidate_key(finding: Finding) -> str:
