@@ -221,6 +221,30 @@ class CaseDatabase:
         )
         self.connection.commit()
 
+    def get_provider_state(self, provider: str, state_key: str) -> Any | None:
+        row = self.connection.execute(
+            "SELECT value_json FROM provider_state WHERE provider=? AND state_key=?",
+            (provider, state_key),
+        ).fetchone()
+        return json.loads(row["value_json"]) if row else None
+
+    def set_provider_state(self, provider: str, state_key: str, value: Any) -> None:
+        self.connection.execute(
+            """INSERT INTO provider_state(provider, state_key, value_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(provider, state_key) DO UPDATE SET
+               value_json=excluded.value_json, updated_at=excluded.updated_at""",
+            (provider, state_key, json.dumps(value, ensure_ascii=False, sort_keys=True), utc_now()),
+        )
+        self.connection.commit()
+
+    def clear_provider_state(self, provider: str, state_key: str) -> None:
+        self.connection.execute(
+            "DELETE FROM provider_state WHERE provider=? AND state_key=?",
+            (provider, state_key),
+        )
+        self.connection.commit()
+
     def add_pivot(self, pivot_type: str, value: str, source_url: str, confidence: str) -> bool:
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO pivots

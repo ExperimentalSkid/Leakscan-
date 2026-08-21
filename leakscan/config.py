@@ -11,6 +11,8 @@ from urllib.parse import quote, urlsplit
 
 import yaml
 
+from . import __version__
+
 
 @dataclass(slots=True)
 class SeedConfig:
@@ -49,7 +51,7 @@ class CrawlConfig:
     max_html_bytes: int = 2 * 1024 * 1024
     max_redirects: int = 10
     respect_robots_txt: bool = True
-    user_agent: str = "Leakscan/1.0"
+    user_agent: str = "Leakscan/{version}"
 
 
 @dataclass(slots=True)
@@ -59,6 +61,8 @@ class SearchConfig:
     max_queries_per_provider: int = 80
     max_pivot_rounds: int = 20
     max_pivots_per_round: int = 50
+    provider_failure_threshold: int = 2
+    provider_rate_limit_cooldown_seconds: int = 300
     safe_search: str = "off"
     intent_terms: list[str] = field(default_factory=lambda: ["leak", "breach", "dump", "mirror", "download"])
 
@@ -73,7 +77,11 @@ class ScoringConfig:
 
 @dataclass(slots=True)
 class SafetyConfig:
-    archive_extensions: list[str] = field(default_factory=lambda: [".7z", ".zip", ".rar"])
+    archive_extensions: list[str] = field(default_factory=lambda: [
+        ".7z", ".zip", ".rar", ".tar", ".gz", ".bz2", ".xz",
+        ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".zst", ".zipx",
+        ".7z.001", ".part01.rar", ".001",
+    ])
     allowed_schemes: list[str] = field(default_factory=lambda: ["http", "https"])
     reject_private_networks: bool = True
 
@@ -117,9 +125,11 @@ def load_config(
     if not (case.item_ids or case.filenames or case.distinctive_phrases):
         raise ValueError("case file must define at least one identifying fingerprint")
     default_output = resolved_case.parent.parent / f"case_{_safe_case_name(case.name)}"
+    crawl = CrawlConfig(**settings.get("crawl", {}))
+    crawl.user_agent = _render_user_agent(crawl.user_agent)
     return AppConfig(
         case=case,
-        crawl=CrawlConfig(**settings.get("crawl", {})),
+        crawl=crawl,
         search=SearchConfig(**settings.get("search", {})),
         scoring=ScoringConfig(**settings.get("scoring", {})),
         safety=SafetyConfig(**settings.get("safety", {})),
@@ -127,6 +137,16 @@ def load_config(
         settings_path=resolved_settings,
         case_path=resolved_case,
     )
+
+
+def _render_user_agent(template: str) -> str:
+    user_agent = template.replace("{version}", __version__)
+    contact = re.sub(r"[\x00-\x1f\x7f]+", "", os.getenv("LEAKSCAN_CONTACT", "")).strip()[:200]
+    if not contact:
+        return user_agent
+    if user_agent.endswith(")"):
+        return f"{user_agent[:-1]}; contact={contact})"
+    return f"{user_agent} contact={contact}"
 
 
 def _safe_case_name(value: str) -> str:
@@ -160,22 +180,30 @@ def initial_fingerprints(case: CaseConfig) -> dict[str, set[str]]:
     }
 
 
-def filename_variants(filename: str, archive_extensions: list[str]) -> set[str]:
-    path = Path(filename)
-    stem = path.stem if path.suffix else filename
-    variants = {
+def filename_variants(filename: str, archive_extensions: list[str]) -> list[str]:
+    lowered = filename.casefold()
+    matched_suffix = next(
+        (
+            extension
+            for extension in sorted(archive_extensions, key=len, reverse=True)
+            if lowered.endswith(extension.casefold())
+        ),
+        "",
+    )
+    stem = filename[:-len(matched_suffix)] if matched_suffix else Path(filename).stem
+    variants = [
         filename,
         stem,
+        quote(filename),
         filename.replace(" ", "_"),
         filename.replace(" ", "-"),
-        quote(filename),
         re.sub(r"[^\w\s.-]", "", filename),
         filename.lower(),
         filename.upper(),
-    }
+    ]
     for extension in archive_extensions:
-        variants.add(stem + extension)
-    return {value for value in variants if value}
+        variants.append(stem + extension)
+    return list(dict.fromkeys(value for value in variants if value))
 
 
 def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None = None) -> list[str]:
@@ -184,7 +212,7 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
         values.setdefault(kind, set()).update(entry for entry in entries if entry)
     queries: list[str] = []
     for filename in sorted(values["filename"]):
-        for variant in sorted(filename_variants(filename, config.safety.archive_extensions)):
+        for variant in filename_variants(filename, config.safety.archive_extensions):
             queries.append(f'"{variant}"')
         stem = Path(filename).stem
         for term in config.search.intent_terms:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "leakscan-osint"
-version = "1.0.0"
+version = "1.1.0"
 description = "Catalog-first public-reference discovery and metadata-only verification for OSINT investigations"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -37,8 +37,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build>=1.2,<2",
-  "pytest>=8.2,<9",
-  "pytest-asyncio>=0.23,<1",
+  "pip-audit>=2.10,<3",
+  "pytest>=9.0.3,<10",
+  "pytest-asyncio>=1.2,<2",
   "ruff>=0.6,<1",
   "twine>=5,<7",
 ]

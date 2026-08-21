@@ -139,7 +139,9 @@ def classify(
     blocked: bool = False,
     metadata_archive_confirmed: bool = False,
 ) -> str:
-    if blocked or status_code in {401, 403, 429, 451, 999}:
+    if status_code == 451:
+        return "TAKEN_DOWN"
+    if blocked or status_code in {401, 403, 429, 999}:
         return "BLOCKED"
     if status_code in {404, 410}:
         return "DEAD"

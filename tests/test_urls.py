@@ -15,6 +15,13 @@ def test_archive_detection_uses_path_not_query():
     assert not looks_like_archive_url("https://example.com/page?name=sample.7z", [".7z"])
 
 
+def test_compound_and_split_archive_paths_are_detected():
+    extensions = [".tar.gz", ".7z.001", ".part01.rar"]
+    assert looks_like_archive_url("https://example.com/files/sample.tar.gz", extensions)
+    assert looks_like_archive_url("https://example.com/files/sample.7z.001", extensions)
+    assert looks_like_archive_url("https://example.com/files/sample.part01.rar", extensions)
+
+
 def test_private_host_is_rejected():
     allowed, reason = safe_url("http://127.0.0.1/admin", ["http", "https"], reject_private=True)
     assert not allowed

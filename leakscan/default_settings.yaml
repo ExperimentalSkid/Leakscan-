@@ -10,7 +10,7 @@ crawl:
   max_html_bytes: 2097152
   max_redirects: 10
   respect_robots_txt: true
-  user_agent: "Leakscan/1.0 (+public-reference research; metadata-only archive checks)"
+  user_agent: "Leakscan/{version} (+public-reference research; metadata-only archive checks)"
 
 search:
   providers:
@@ -29,6 +29,8 @@ search:
   max_queries_per_provider: 80
   max_pivot_rounds: 20
   max_pivots_per_round: 50
+  provider_failure_threshold: 2
+  provider_rate_limit_cooldown_seconds: 300
   safe_search: "off"
   intent_terms:
     - leak
@@ -45,13 +47,22 @@ scoring:
 
 safety:
   archive_extensions:
+    - .tar.gz
+    - .tar.bz2
+    - .7z.001
+    - .part01.rar
     - .7z
     - .zip
+    - .zipx
     - .rar
     - .tar
     - .gz
     - .bz2
     - .xz
+    - .tgz
+    - .tbz2
+    - .zst
+    - ".001"
   allowed_schemes:
     - http
     - https

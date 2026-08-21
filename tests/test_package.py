@@ -5,7 +5,7 @@ from leakscan.main import build_parser
 
 
 def test_version_matches_release() -> None:
-    assert __version__ == "1.0.0"
+    assert __version__ == "1.1.0"
 
 
 def test_bundled_defaults_and_example_exist() -> None:

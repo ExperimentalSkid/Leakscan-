@@ -25,6 +25,10 @@ def test_likely_classification(app_config):
     assert classify(app_config.scoring.likely_threshold, app_config) == "LIKELY"
 
 
+def test_legal_takedown_status_is_distinct_from_generic_block(app_config):
+    assert classify(100, app_config, status_code=451, blocked=True) == "TAKEN_DOWN"
+
+
 def test_target_size_accepts_decimal_and_binary_interpretations():
     ranges = target_size_ranges("549.04 MB", 0.01)
     assert any(low <= 549_040_000 <= high for low, high in ranges)

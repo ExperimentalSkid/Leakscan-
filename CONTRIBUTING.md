@@ -15,6 +15,7 @@ Before opening a pull request, run:
 ```powershell
 ruff check .
 pytest
+python -m pip_audit --local
 python -m build
 twine check dist\*
 ```

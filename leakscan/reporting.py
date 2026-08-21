@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import csv
 import json
+import re
 from collections import Counter
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .config import AppConfig, generate_queries
 from .database import CaseDatabase
 from .models import Finding
@@ -20,7 +22,16 @@ CSV_FIELDS = [
     "normalized_size_bytes", "content_type", "content_disposition", "response_headers", "hashes", "dates", "accounts",
     "redirect_chain", "page_title", "canonical_url", "context_excerpt", "depth", "score", "score_reasons", "classification",
     "first_seen", "last_checked", "notes", "original_url", "normalized_url",
-    "evidence_sha256", "evidence_path", "relation",
+    "evidence_sha256", "evidence_path", "relation", "detection_point", "verification_point",
+]
+
+CANDIDATE_FIELDS = [
+    "candidate_url", "current_status", "current_http_status", "filename", "maximum_score",
+    "observation_count", "first_detected_at", "detection_provider", "detection_query",
+    "detection_record_url", "detection_record_id", "provider_observed_at", "last_checked",
+    "verification_method", "verification_url", "host_object_id", "verified_at",
+    "verified_filename", "verified_size_bytes", "verified_sha256", "availability",
+    "current_evidence_path", "sources", "referrer_url",
 ]
 
 
@@ -49,7 +60,7 @@ def write_manifest(
     manifest = {
         "schema_version": 1,
         "generated_at_utc": utc_now(),
-        "tool_version": "1.0.0",
+        "tool_version": __version__,
         "command": command,
         "dry_run": dry_run,
         "configuration": config.as_manifest_dict(),
@@ -85,17 +96,9 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     _write_csv(config.output_dir / "findings.csv", dictionaries, CSV_FIELDS)
 
-    candidates = [
-        row for row in dictionaries
-        if row["score"] >= config.scoring.likely_threshold
-        or row["classification"] == "CONFIRMED_METADATA_ONLY"
-    ]
-    _write_csv(
-        config.output_dir / "candidate_urls.csv", candidates,
-        ["candidate_url", "final_url", "domain", "status_code", "filename", "reported_size",
-         "normalized_size_bytes", "content_type", "content_disposition", "score", "score_reasons",
-         "classification", "last_checked", "source", "referrer_url", "evidence_path"],
-    )
+    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    _write_csv(config.output_dir / "candidate_urls.csv", candidates, CANDIDATE_FIELDS)
+    _write_csv(config.output_dir / "detection_points.csv", candidates, CANDIDATE_FIELDS)
     domains = []
     for row in database.iter_domains():
         row["ip_addresses"] = row.pop("ip_addresses_json", "[]")
@@ -105,19 +108,28 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
         config.output_dir / "domains.csv", domains,
         ["hostname", "parent_domain", "ip_addresses", "asn", "tls", "first_seen", "last_checked", "status", "error"],
     )
-    hash_rows = []
-    seen_hash_rows: set[tuple[str, str, str]] = set()
+    hash_rows_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    confidence_rank = {"unresolved": 0, "contextual": 1, "host_metadata_verified": 2}
     for finding in findings:
         for item in finding.hashes:
             key = (item.get("algorithm", ""), item.get("value", ""), finding.final_url or finding.source_url)
-            if key in seen_hash_rows:
-                continue
-            seen_hash_rows.add(key)
-            hash_rows.append({
+            method = str(finding.verification_point.get("method", ""))
+            confidence = (
+                "host_metadata_verified"
+                if method.endswith("_api") and finding.classification in {
+                    "CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED", "TAKEN_DOWN"
+                }
+                else "contextual" if finding.score >= config.scoring.likely_threshold else "unresolved"
+            )
+            row = {
                 "algorithm": key[0], "hash": key[1], "source_url": key[2],
-                "confidence": "contextual" if finding.score >= config.scoring.likely_threshold else "unresolved",
+                "confidence": confidence,
                 "observed_at": finding.timestamp_utc,
-            })
+            }
+            existing = hash_rows_by_key.get(key)
+            if existing is None or confidence_rank[confidence] > confidence_rank[existing["confidence"]]:
+                hash_rows_by_key[key] = row
+    hash_rows = list(hash_rows_by_key.values())
     _write_csv(config.output_dir / "hashes.csv", hash_rows, ["algorithm", "hash", "source_url", "confidence", "observed_at"])
 
     redirect_rows = []
@@ -132,10 +144,17 @@ def export_reports(config: AppConfig, database: CaseDatabase) -> None:
         config.output_dir / "redirects.csv", redirect_rows,
         ["source_url", "hop", "url", "status_code", "location", "observed_at"],
     )
-    dead = [row for row in dictionaries if row["classification"] in {"DEAD", "BLOCKED"}]
+    dead = [
+        row for row in candidates
+        if row["current_status"] in {"DEAD", "HISTORICAL_DEAD", "TAKEN_DOWN", "BLOCKED"}
+    ]
     _write_csv(
         config.output_dir / "dead_links.csv", dead,
-        ["candidate_url", "final_url", "status_code", "classification", "last_checked", "source", "notes"],
+        [
+            "candidate_url", "current_http_status", "current_status", "last_checked",
+            "detection_provider", "detection_record_url", "verification_method",
+            "verification_url", "host_object_id", "current_evidence_path",
+        ],
     )
     _write_discovery_report(config, database, findings)
     _write_analyst_summary(config, database, findings)
@@ -148,13 +167,145 @@ def _display_url(finding: Finding) -> str:
     return finding.final_url or finding.normalized_url or finding.candidate_url or finding.source_url
 
 
+def _candidate_key(finding: Finding) -> str:
+    return finding.normalized_url or finding.candidate_url or finding.final_url or finding.original_url
+
+
+def _candidate_summaries(findings: list[Finding], likely_threshold: int) -> list[dict[str, Any]]:
+    grouped: dict[str, list[Finding]] = {}
+    for finding in findings:
+        key = _candidate_key(finding)
+        if key:
+            grouped.setdefault(key, []).append(finding)
+
+    output: list[dict[str, Any]] = []
+    for url, observations in grouped.items():
+        maximum_score = max((item.score for item in observations), default=0)
+        relevant_status = any(
+            item.classification in {
+                "CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED", "TAKEN_DOWN",
+                "DEAD", "BLOCKED", "UNVERIFIED", "LIKELY",
+            }
+            for item in observations
+        )
+        if maximum_score < likely_threshold and not relevant_status:
+            continue
+        direct = [
+            item for item in observations
+            if item.discovery_method != "search_result" and (item.last_checked or item.status_code is not None)
+        ]
+        current = max(direct, key=lambda item: item.last_checked or item.timestamp_utc) if direct else None
+        indexed = [item for item in observations if item.discovery_method == "search_result"]
+        detection = min(indexed or observations, key=lambda item: item.timestamp_utc or item.first_seen)
+        point = detection.detection_point or _legacy_detection_point(detection)
+        verification = current.verification_point if current else {}
+        host_metadata = verification.get("metadata", {})
+        current_status = _current_candidate_status(current, bool(indexed))
+        filename = next(
+            (item.filename for item in ([current] if current else []) + observations if item and item.filename),
+            "",
+        )
+        output.append({
+            "candidate_url": url,
+            "current_status": current_status,
+            "current_http_status": current.status_code if current else "",
+            "filename": filename,
+            "maximum_score": maximum_score,
+            "observation_count": len(observations),
+            "first_detected_at": point.get("detected_at") or detection.first_seen or detection.timestamp_utc,
+            "detection_provider": point.get("provider") or detection.source,
+            "detection_query": point.get("query") or detection.query,
+            "detection_record_url": point.get("record_url") or detection.source_url,
+            "detection_record_id": point.get("record_id", ""),
+            "provider_observed_at": point.get("provider_observed_at", ""),
+            "last_checked": current.last_checked if current else "",
+            "verification_method": verification.get("method", ""),
+            "verification_url": verification.get("endpoint", ""),
+            "host_object_id": verification.get("object_id", ""),
+            "verified_at": verification.get("verified_at", current.last_checked if current else ""),
+            "verified_filename": host_metadata.get("name", current.filename if current else ""),
+            "verified_size_bytes": host_metadata.get(
+                "size", current.normalized_size_bytes if current else ""
+            ),
+            "verified_sha256": host_metadata.get("hash_sha256", ""),
+            "availability": host_metadata.get("availability", ""),
+            "current_evidence_path": current.evidence_path if current else "",
+            "sources": sorted({item.source for item in observations if item.source}),
+            "referrer_url": current.referrer_url if current else detection.referrer_url,
+        })
+    return sorted(output, key=lambda item: (-int(item["maximum_score"]), item["candidate_url"]))
+
+
+def _legacy_detection_point(finding: Finding) -> dict[str, str]:
+    point = {
+        "provider": finding.source,
+        "query": finding.query,
+        "detected_at": finding.first_seen or finding.timestamp_utc,
+        "provider_observed_at": "",
+        "record_url": finding.source_url,
+        "record_id": "",
+    }
+    if finding.source == "urlscan":
+        match = re.search(r"urlscan result ([0-9a-f-]{20,})", finding.context_excerpt, re.IGNORECASE)
+        if match:
+            point["record_id"] = match.group(1)
+            point["record_url"] = f"https://urlscan.io/result/{match.group(1)}/"
+    return point
+
+
+def _current_candidate_status(current: Finding | None, has_index_reference: bool) -> str:
+    if current is None:
+        return "UNVERIFIED"
+    if current.classification == "TAKEN_DOWN" or current.status_code == 451:
+        return "TAKEN_DOWN"
+    if current.classification == "DEAD" or current.status_code in {404, 410}:
+        return "HISTORICAL_DEAD" if has_index_reference else "DEAD"
+    if current.classification == "BLOCKED" or current.status_code in {401, 403, 429, 999}:
+        return "BLOCKED"
+    if current.classification == "LIVE_RESTRICTED":
+        return "LIVE_RESTRICTED"
+    if current.classification == "CONFIRMED_METADATA_ONLY":
+        return "LIVE_METADATA_ONLY"
+    if current.status_code is not None and 200 <= current.status_code < 400:
+        return "CURRENT_REFERENCE_ONLY"
+    return "UNKNOWN"
+
+
+def _candidate_line(item: dict[str, Any]) -> str:
+    detection = f"detected by `{item['detection_provider']}`"
+    if item["first_detected_at"]:
+        detection += f" at `{item['first_detected_at']}`"
+    query = f"; query `{item['detection_query']}`" if item["detection_query"] else ""
+    record = f"; record <{item['detection_record_url']}>" if item["detection_record_url"] else ""
+    record_id = f" (`{item['detection_record_id']}`)" if item["detection_record_id"] else ""
+    checked = f"; checked `{item['last_checked']}`" if item["last_checked"] else ""
+    status = f"; HTTP {item['current_http_status']}" if item["current_http_status"] != "" else ""
+    verification = (
+        f"; verified via `{item['verification_method']}`"
+        if item["verification_method"]
+        else ""
+    )
+    object_id = f"; object `{item['host_object_id']}`" if item["host_object_id"] else ""
+    return (
+        f"- <{item['candidate_url']}> — `{item['current_status']}`{status}; "
+        f"score {item['maximum_score']}; {detection}{query}{record}{record_id}"
+        f"{verification}{object_id}{checked}."
+    )
+
+
 def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings: list[Finding]) -> None:
     case = config.case
-    classifications = Counter(finding.classification for finding in findings)
+    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    classifications = Counter(item["current_status"] for item in candidates)
     providers = sorted({finding.source for finding in findings if finding.source})
-    confirmed = _unique_findings(findings, "CONFIRMED_METADATA_ONLY")
-    likely = _unique_findings(findings, "LIKELY")
-    dead = [finding for finding in findings if finding.classification in {"DEAD", "BLOCKED"}]
+    confirmed = [
+        item for item in candidates
+        if item["current_status"] in {"LIVE_METADATA_ONLY", "LIVE_RESTRICTED"}
+    ]
+    current_references = [item for item in candidates if item["current_status"] == "CURRENT_REFERENCE_ONLY"]
+    unresolved = [item for item in candidates if item["current_status"] in {"UNVERIFIED", "UNKNOWN", "BLOCKED"}]
+    dead = [item for item in candidates if item["current_status"] in {"DEAD", "HISTORICAL_DEAD"}]
+    taken_down = [item for item in candidates if item["current_status"] == "TAKEN_DOWN"]
     hashes = {(item.get("algorithm", ""), item.get("value", "")) for finding in findings for item in finding.hashes}
     lines = [
         f"# Discovery report: {case.name}", "",
@@ -166,7 +317,7 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         *(f"- Seed listing: <{seed.url}> (`{seed.adapter}` adapter)" for seed in case.seeds), "",
         "The target definition is operator-supplied seed information. It is not, by itself, proof that an archive is currently available.", "",
         "## 2. Methodology", "",
-        "Independent search providers were queried with exact identifiers, filename mutations, descriptive fragments, and discovered hash pivots. Relevant public HTML/text pages were retrieved within configured bounds. Archive-like URLs were checked with headers-only requests; fallback range requests were opened without consuming the body.", "",
+        "Independent search providers were queried with exact identifiers, filename mutations, descriptive fragments, and discovered hash pivots. Relevant public HTML/text pages were retrieved within configured bounds. Recognized file hosts were checked through public metadata APIs; other archive-like URLs used headers-only requests or bodyless range fallbacks.", "",
         "## 3. Search providers used", "",
         *(f"- `{provider}`" for provider in providers),
         "", "## 4. Exact queries", "",
@@ -174,20 +325,14 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         "", "## 5. Confirmed public references and metadata-only archive candidates", "",
     ]
     if confirmed:
-        lines.extend(
-            f"- Direct observation: [{item.filename or _display_url(item)}]({_display_url(item)}) — HTTP {item.status_code}; score {item.score}; archive response body not read."
-            for item in confirmed
-        )
+        lines.extend(_candidate_line(item) for item in confirmed)
     else:
-        lines.append("No candidate met the strict `CONFIRMED_METADATA_ONLY` criteria in this run.")
-    lines.extend(["", "## 6. Candidate hosting URLs", ""])
-    if likely:
-        lines.extend(
-            f"- {_display_url(item)} — `{item.classification}`, score {item.score}, source `{item.source}`."
-            for item in likely
-        )
+        lines.append("No file met the strict current live-metadata criteria in this run.")
+    lines.extend(["", "## 6. Current reference pages", ""])
+    if current_references:
+        lines.extend(_candidate_line(item) for item in current_references)
     else:
-        lines.append("No unresolved candidate exceeded the configured likely threshold.")
+        lines.append("No current HTML/reference page was directly observed.")
     lines.extend(["", "## 7. Duplicate and mirror relationships", ""])
     relationships = database.iter_relationships()
     if relationships:
@@ -204,35 +349,33 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         for item in domains
     ) if domains else lines.append("No domain metadata was collected.")
     lines.extend(["", "## 9. Hashes found", ""])
-    lines.extend(f"- `{algorithm.upper()}` `{value}` (contextual observation)" for algorithm, value in sorted(hashes)) if hashes else lines.append("No cryptographic hash was extracted from a relevant page.")
-    lines.extend(["", "## 10. Dead and historical references", ""])
-    lines.extend(f"- {_display_url(item)} — `{item.classification}` / HTTP {item.status_code}." for item in dead) if dead else lines.append("No dead or blocked references were recorded.")
+    lines.extend(
+        f"- `{algorithm.upper()}` `{value}` (see `hashes.csv` for provenance)"
+        for algorithm, value in sorted(hashes)
+    ) if hashes else lines.append("No cryptographic hash was extracted from a relevant page or host API.")
+    lines.extend(["", "## 10. Dead, historical, and taken-down references", ""])
+    lines.extend(_candidate_line(item) for item in dead) if dead else lines.append("No dead or historical reference was recorded.")
+    lines.extend(_candidate_line(item) for item in taken_down)
     timeline = sorted((finding.timestamp_utc, _display_url(finding), finding.discovery_method) for finding in findings)
     lines.extend(["", "## 11. Timeline", ""])
     lines.extend(f"- `{timestamp}` — `{method}` — {url}" for timestamp, url, method in timeline[:500]) if timeline else lines.append("No observations recorded.")
     lines.extend([
         "", "## 12. Unresolved candidates", "",
-        f"Unresolved likely candidates: **{len(likely)}**. Review `candidate_urls.csv` and the preserved evidence paths for handoff.", "",
+        f"Unresolved unique candidates: **{len(unresolved)}**. Review `candidate_urls.csv`, `detection_points.csv`, and preserved evidence paths for handoff.", "",
+        *(_candidate_line(item) for item in unresolved), "",
         "## 13. Limitations", "",
         "Search coverage depends on public indexing, provider availability, API credentials, rate limits, robots directives, and configured crawl bounds. Third-party statements remain attributed claims. A metadata-only confirmation establishes only the observed HTTP response metadata at the recorded time; it does not validate archive contents or ownership.", "",
-        "## Classification totals", "",
+        "## Unique candidate status totals", "",
         *(f"- `{name}`: {count}" for name, count in sorted(classifications.items())), "",
+        f"Raw observations preserved: **{len(findings)}**.", "",
     ])
     (config.output_dir / "reports" / "discovery_report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _unique_findings(findings: list[Finding], classification: str) -> list[Finding]:
-    output: dict[str, Finding] = {}
-    for finding in findings:
-        if finding.classification != classification:
-            continue
-        output.setdefault(_display_url(finding), finding)
-    return list(output.values())
-
-
 def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: list[Finding]) -> None:
-    counts = Counter(finding.classification for finding in findings)
-    highest = sorted(findings, key=lambda item: item.score, reverse=True)[:10]
+    candidates = _candidate_summaries(findings, config.scoring.likely_threshold)
+    counts = Counter(item["current_status"] for item in candidates)
+    highest = candidates[:10]
     lines = [
         f"# Analyst summary: {config.case.name}", "",
         f"Generated: `{utc_now()}`", "",
@@ -240,20 +383,25 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
         (
             f"The run preserved **{len(findings)} observations** across "
             f"**{len({item.domain for item in findings if item.domain})} domains**. "
-            f"Strict metadata-only confirmations: **{counts['CONFIRMED_METADATA_ONLY']}**; "
-            f"unresolved likely candidates: **{counts['LIKELY']}**; "
-            f"dead/blocked: **{counts['DEAD'] + counts['BLOCKED']}**."
+            f"Unique candidates: **{len(candidates)}**; "
+            f"live metadata-only files: **{counts['LIVE_METADATA_ONLY']}**; "
+            f"live but restricted files: **{counts['LIVE_RESTRICTED']}**; "
+            f"taken down: **{counts['TAKEN_DOWN']}**; "
+            f"current reference pages: **{counts['CURRENT_REFERENCE_ONLY']}**; "
+            f"historical/dead: **{counts['HISTORICAL_DEAD'] + counts['DEAD']}**; "
+            f"unverified/unknown/blocked: **{counts['UNVERIFIED'] + counts['UNKNOWN'] + counts['BLOCKED']}**."
         ), "",
-        "## Highest-scoring observations", "",
+        "## Highest-scoring unique candidates and detection points", "",
     ]
-    lines.extend(
-        f"- Score **{item.score}** — `{item.classification}` — {_display_url(item)}"
-        for item in highest
-    ) if highest else lines.append("No observations recorded.")
+    lines.extend(_candidate_line(item) for item in highest) if highest else lines.append("No candidates recorded.")
     lines.extend([
         "", "## Evidentiary cautions", "",
         "- Search-result snippets and third-party page claims are references, not independent confirmation.",
-        "- `CONFIRMED_METADATA_ONLY` means HTTP metadata was observed without reading an archive body.",
+        "- Only `LIVE_METADATA_ONLY` means a current response established file-like metadata without reading the archive body.",
+        "- `LIVE_RESTRICTED` means host-native metadata confirms the object but access is restricted.",
+        "- `TAKEN_DOWN` means the host reports legal/abuse removal or returned HTTP 451.",
+        "- `CURRENT_REFERENCE_ONLY` means a current HTML/reference page exists; it does not prove the archive payload is live.",
+        "- `HISTORICAL_DEAD` means an index detected the candidate but the latest direct check returned `404` or `410`.",
         "- Review timestamps, redirect chains, headers, and preserved page hashes before a takedown submission.", "",
     ])
     (config.output_dir / "reports" / "analyst_summary.md").write_text("\n".join(lines), encoding="utf-8")

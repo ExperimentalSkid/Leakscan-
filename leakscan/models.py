@@ -14,6 +14,8 @@ class SearchResult:
     provider: str = ""
     query: str = ""
     published: str = ""
+    source_url: str = ""
+    record_id: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -58,6 +60,7 @@ class FetchResult:
     blocked_reason: str = ""
     is_binary: bool = False
     truncated: bool = False
+    verification_point: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -97,6 +100,8 @@ class Finding:
     evidence_sha256: str = ""
     evidence_path: str = ""
     relation: str = ""
+    detection_point: dict[str, Any] = field(default_factory=dict)
+    verification_point: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

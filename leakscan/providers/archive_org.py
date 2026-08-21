@@ -7,20 +7,26 @@ import re
 import httpx
 
 from ..models import SearchResult
-from .base import SearchProvider
+from .base import SearchProvider, strip_archive_suffix
 
 
 class ArchiveOrgProvider(SearchProvider):
     name = "archive_org"
 
-    @staticmethod
-    def _pattern(query: str) -> str:
+    def _pattern(self, query: str) -> str:
         cleaned = query.replace('"', "").strip()
         match = re.search(r"https?://([^\s]+)", cleaned)
         if match:
             return match.group(1).rstrip("/") + "*"
-        tokens = re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
+        tokens = [
+            strip_archive_suffix(token, self.archive_extensions)
+            for token in re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
+        ]
+        tokens = [token for token in tokens if token]
         return "*" + max(tokens, key=len) + "*" if tokens else ""
+
+    def request_key(self, query: str) -> str:
+        return self._pattern(query).casefold()
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         pattern = self._pattern(query)
@@ -46,6 +52,8 @@ class ArchiveOrgProvider(SearchProvider):
                 output.append(SearchResult(
                     url=original, title="Internet Archive historical URL",
                     excerpt=f"Archived {timestamp}; MIME {item.get('mimetype', '')}",
-                    provider=self.name, query=query, published=timestamp, metadata=item,
+                    provider=self.name, query=query, published=timestamp,
+                    source_url=f"https://web.archive.org/web/{timestamp}/{original}" if timestamp else "",
+                    record_id=item.get("digest", ""), metadata=item,
                 ))
         return output

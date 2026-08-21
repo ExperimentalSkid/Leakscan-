@@ -8,7 +8,7 @@ import re
 import httpx
 
 from ..models import SearchResult
-from .base import ProviderUnavailable, SearchProvider
+from .base import ProviderUnavailable, SearchProvider, strip_archive_suffix
 
 
 class CommonCrawlProvider(SearchProvider):
@@ -24,16 +24,22 @@ class CommonCrawlProvider(SearchProvider):
         self._index_url = data[0]["cdx-api"]
         return self._index_url
 
-    @staticmethod
-    def _pattern(query: str) -> str:
+    def _pattern(self, query: str) -> str:
         cleaned = query.replace('"', "").strip()
         url_match = re.search(r"https?://([^\s]+)", cleaned)
         if url_match:
             return url_match.group(1).rstrip("/") + "*"
-        tokens = re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
+        tokens = [
+            strip_archive_suffix(token, self.archive_extensions)
+            for token in re.findall(r"[A-Za-z0-9_.-]{6,}", cleaned)
+        ]
+        tokens = [token for token in tokens if token]
         if not tokens:
             return ""
         return "*" + max(tokens, key=len) + "*"
+
+    def request_key(self, query: str) -> str:
+        return self._pattern(query).casefold()
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         pattern = self._pattern(query)
@@ -57,7 +63,8 @@ class CommonCrawlProvider(SearchProvider):
             if url:
                 results.append(SearchResult(
                     url=url, title="Common Crawl indexed URL", excerpt=f"Captured {item.get('timestamp', '')}",
-                    provider=self.name, query=query, published=item.get("timestamp", ""), metadata=item,
+                    provider=self.name, query=query, published=item.get("timestamp", ""),
+                    source_url=index_url, record_id=item.get("digest", ""), metadata=item,
                 ))
             if len(results) >= limit:
                 break

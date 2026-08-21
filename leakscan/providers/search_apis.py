@@ -53,11 +53,14 @@ class GoogleProvider(SearchProvider):
 
 class GitLabProvider(SearchProvider):
     name = "gitlab"
+    api_key_env = "GITLAB_TOKEN"
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         cleaned = query.replace('"', "").strip()
         data = await self.get_json(
-            client, "https://gitlab.com/api/v4/search", params={"scope": "blobs", "search": cleaned, "per_page": min(limit, 100)}
+            client, "https://gitlab.com/api/v4/search",
+            params={"scope": "blobs", "search": cleaned, "per_page": min(limit, 100)},
+            headers={"PRIVATE-TOKEN": os.environ["GITLAB_TOKEN"]},
         )
         return [
             SearchResult(url=item.get("url", ""), title=item.get("filename", ""), excerpt=item.get("data", "")[:500],
@@ -69,6 +72,9 @@ class GitLabProvider(SearchProvider):
 class VirusTotalProvider(SearchProvider):
     name = "virustotal"
     api_key_env = "VIRUSTOTAL_API_KEY"
+
+    def request_key(self, query: str) -> str:
+        return is_probable_hash(query)
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         digest = is_probable_hash(query)
@@ -91,6 +97,9 @@ class VirusTotalProvider(SearchProvider):
 
 class OTXProvider(SearchProvider):
     name = "otx"
+
+    def request_key(self, query: str) -> str:
+        return is_probable_hash(query)
 
     async def search(self, client: httpx.AsyncClient, query: str, limit: int) -> list[SearchResult]:
         digest = is_probable_hash(query)

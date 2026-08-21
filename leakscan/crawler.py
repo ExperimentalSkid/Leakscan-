@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from .config import AppConfig
 from .database import CaseDatabase
 from .domains import inspect_domain, parent_domain
+from .host_verifiers import host_metadata_classification
 from .http import SafeHTTPClient
 from .models import FetchResult, Finding
 from .parser import context_excerpt, parse_page
@@ -81,7 +82,11 @@ class Crawler:
             return
         if fetch.final_url and normalize_url(fetch.final_url) != url:
             self.database.add_relationship(url, normalize_url(fetch.final_url), "redirect_alias", json.dumps(fetch.redirect_chain))
-        if fetch.is_binary or looks_like_archive_url(fetch.final_url or url, self.config.safety.archive_extensions):
+        if (
+            fetch.verification_point
+            or fetch.is_binary
+            or looks_like_archive_url(fetch.final_url or url, self.config.safety.archive_extensions)
+        ):
             self._record_metadata_finding(item, fetch)
             self.database.mark_url(url, "done")
             return
@@ -111,6 +116,7 @@ class Crawler:
             first_seen=item["created_at"], last_checked=now,
             notes=fetch.blocked_reason or fetch.error, original_url=item["original_url"],
             normalized_url=item["normalized_url"], redirect_chain=fetch.redirect_chain,
+            verification_point=fetch.verification_point,
         )
         self.database.record_finding(finding)
 
@@ -118,14 +124,26 @@ class Crawler:
         now = utc_now()
         final_url = fetch.final_url or item["normalized_url"]
         headers = fetch.headers
+        verification = fetch.verification_point
+        host_metadata = verification.get("metadata", {})
         disposition = headers.get("content-disposition", "")
-        content_type = headers.get("content-type", "")
+        content_type = str(host_metadata.get("mime_type") or headers.get("content-type", ""))
         length_text = headers.get("content-length", "")
-        size_bytes = int(length_text) if length_text.isdigit() else None
-        filename = _filename_from_disposition(disposition) or filename_from_url(final_url)
+        host_size = host_metadata.get("size")
+        size_bytes = host_size if isinstance(host_size, int) else int(length_text) if length_text.isdigit() else None
+        filename = str(
+            host_metadata.get("name") or _filename_from_disposition(disposition) or filename_from_url(final_url)
+        )
+        digest_value = str(host_metadata.get("hash_sha256", "")).lower()
+        hashes = (
+            [{"algorithm": "sha256", "value": digest_value, "source": verification.get("method", "host_api")}]
+            if len(digest_value) == 64 and all(character in "0123456789abcdef" for character in digest_value)
+            else []
+        )
         scored = score_candidate(
             self.config, final_url, filename=filename, size_bytes=size_bytes,
             content_type=content_type, content_disposition=disposition,
+            hashes=hashes,
             fingerprints=self.database.pivot_map(),
         )
         header_binary = content_headers_indicate_binary(headers, self.config.safety.archive_extensions)
@@ -135,15 +153,28 @@ class Crawler:
             and "text/html" not in content_type.lower()
         )
         confirmed = header_binary or non_html_archive
-        blocked = fetch.status_code in {401, 403, 429, 451}
-        classification = classify(
-            scored.score, self.config, fetch.status_code, blocked=blocked,
-            metadata_archive_confirmed=confirmed,
-        )
+        method = str(verification.get("method", ""))
+        if method.endswith("_api"):
+            provider = method.removesuffix("_api")
+            classification = host_metadata_classification(provider, fetch.status_code, host_metadata)
+        else:
+            blocked = fetch.status_code in {401, 403, 429}
+            classification = classify(
+                scored.score, self.config, fetch.status_code, blocked=blocked,
+                metadata_archive_confirmed=confirmed,
+            )
+        verification = {
+            **verification,
+            "verified_at": now,
+            "status_code": fetch.status_code,
+            "classification": classification,
+        }
         metadata = {
             "timestamp_utc": now, "requested_url": item["original_url"], "final_url": final_url,
             "status_code": fetch.status_code, "headers": headers,
             "redirect_chain": fetch.redirect_chain, "body_bytes_read": 0,
+            "archive_body_bytes_read": 0,
+            "verification_point": verification,
             "classification": classification,
         }
         digest = hashlib.sha256(final_url.encode("utf-8")).hexdigest()
@@ -154,16 +185,18 @@ class Crawler:
             discovery_method="metadata_only_probe", source_url=item["original_url"],
             candidate_url=item["original_url"], final_url=final_url, referrer_url=item["referrer_url"],
             domain=hostname_for(final_url), status_code=fetch.status_code, filename=filename,
-            reported_size=length_text, normalized_size_bytes=size_bytes, content_type=content_type,
+            reported_size=str(host_size) if isinstance(host_size, int) else length_text,
+            normalized_size_bytes=size_bytes, content_type=content_type,
             content_disposition=disposition, response_headers=headers, redirect_chain=fetch.redirect_chain,
+            hashes=hashes,
             depth=item["depth"], score=scored.score, score_reasons=scored.reasons,
             classification=classification, first_seen=item["created_at"], last_checked=now,
-            notes="Metadata-only probe; response body was not consumed.",
+            notes="Metadata-only verification; archive body was not consumed.",
             original_url=item["original_url"], normalized_url=item["normalized_url"],
-            evidence_path=str(evidence_path),
+            evidence_path=str(evidence_path), verification_point=verification,
         )
         self.database.record_finding(finding)
-        label = "CANDIDATE" if classification not in {"DEAD", "BLOCKED"} else classification
+        label = "CANDIDATE" if classification not in {"DEAD", "BLOCKED", "TAKEN_DOWN"} else classification
         LOG.info("[%s] %s status=%s score=%s body=0", label, final_url, fetch.status_code, scored.score)
         return finding
 
