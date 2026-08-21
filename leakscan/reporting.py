@@ -544,6 +544,7 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
         "## 1. Target definition", "",
         f"- Item IDs: {', '.join(f'`{value}`' for value in case.item_ids) or 'Not supplied'}",
         f"- Reported filenames: {', '.join(f'`{value}`' for value in case.filenames) or 'Not supplied'}",
+        f"- Unverified search hashes: {', '.join(f'`{value}`' for value in case.search_hashes) or 'Not supplied'}",
         f"- Reported sizes: {', '.join(f'`{value}`' for value in case.reported_sizes) or 'Not supplied'}",
         f"- Actor aliases: {', '.join(f'`{value}`' for value in case.actor_aliases) or 'Not supplied'}",
         f"- Incident terms: {', '.join(f'`{value}`' for value in case.incident_terms) or 'Not supplied'}",
@@ -554,7 +555,7 @@ def _write_discovery_report(config: AppConfig, database: CaseDatabase, findings:
             f"(subject <{artifact.subject_url}>)"
             for artifact in case.artifacts
         ), "",
-        "The target definition is operator-supplied seed information. It is not, by itself, proof that an archive is currently available.", "",
+        "The target definition consists of operator-supplied search fingerprints and optional seed pages. It is not, by itself, proof that an archive is currently available. Unverified search hashes are discovery pivots only and are not treated as archive hashes.", "",
         "## 2. Methodology", "",
         "Independent search providers were queried with exact identifiers, filename mutations, descriptive fragments, and discovered hash pivots. Relevant public HTML/text pages were retrieved within configured bounds. Recognized file hosts were checked through public metadata APIs; other archive-like URLs used headers-only requests or bodyless range fallbacks.", "",
         "## 3. Search providers used", "",
@@ -693,13 +694,15 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
 def write_case_readme(config: AppConfig) -> None:
     item_ids = ", ".join(f"`{value}`" for value in config.case.item_ids) or "Not supplied"
     filenames = ", ".join(f"`{value}`" for value in config.case.filenames) or "Not supplied"
-    seeds = "\n".join(f"- <{seed.url}> (`{seed.adapter}` adapter)" for seed in config.case.seeds)
+    search_hashes = ", ".join(f"`{value}`" for value in config.case.search_hashes) or "Not supplied"
+    seeds = "\n".join(f"- <{seed.url}> (`{seed.adapter}` adapter)" for seed in config.case.seeds) or "- Not supplied"
     text = f"""# Case {config.case.name}
 
 This directory contains resumable state and evidence exports for public-reference discovery relating to:
 
 - Item IDs: {item_ids}
 - Filenames: {filenames}
+- Unverified search hashes: {search_hashes}
 - Seed listings:
 {seeds}
 

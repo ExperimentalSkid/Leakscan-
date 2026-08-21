@@ -4,6 +4,9 @@ All notable changes to Leakscan are documented here.
 
 ## Unreleased
 
+- Added a no-argument guided scan that creates a reusable case and starts broad discovery from only a filename, object ID, hash, phrase, or URL.
+- Made seed listing URLs optional and kept wizard-entered hashes as unverified search pivots rather than asserted archive hashes.
+- Added explicit results, report, and interruption/resume guidance to the terminal workflow.
 - Removed Brave from the provider registry, defaults, examples, and credential template.
 - Added case-scoped public Telegram preview monitoring that records matching posts, attachment metadata, and outgoing links without downloading attachments.
 - Added actor aliases and incident terms as generic case fingerprints and combined actor/target queries.

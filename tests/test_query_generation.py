@@ -65,6 +65,17 @@ def test_artifact_hash_is_separate_from_payload_hash(app_config) -> None:
     assert f'"{digest}"' in generate_queries(app_config)
 
 
+def test_unverified_search_hash_is_queried_without_becoming_payload_hash(app_config) -> None:
+    digest = "b" * 64
+    app_config.case.search_hashes = [digest]
+
+    fingerprints = initial_fingerprints(app_config.case)
+
+    assert digest in fingerprints["search_hash"]
+    assert digest not in fingerprints["hash"]
+    assert f'"{digest}"' in generate_queries(app_config)
+
+
 def test_actor_and_incident_terms_are_case_driven_search_pivots(app_config) -> None:
     app_config.case.actor_aliases = ["Example Actor"]
     app_config.case.incident_terms = ["50,000 records"]

@@ -5,7 +5,7 @@
 
 Leakscan is a catalog-first OSINT crawler for discovering, correlating, verifying, and preserving evidence of public references and publicly accessible locations associated with a specified file or archive.
 
-The engine contains no organization-specific target logic. Identifiers, filenames, sizes, phrases, aliases, and seed listings come from the case YAML supplied with `--case`. Restrictions such as domain allowlists, deny lists, and exclusion terms are optional controls, not baked-in targets.
+The engine contains no organization-specific target logic. Identifiers, filenames, sizes, phrases, aliases, and optional seed listings come from the guided questions or a case YAML supplied with `--case`. Restrictions such as domain allowlists, deny lists, and exclusion terms are optional controls, not baked-in targets.
 
 ## What it does
 
@@ -30,25 +30,32 @@ python -m pip install -e .
 Copy-Item .env.example .env
 ```
 
-On macOS or Linux, activate with `source .venv/bin/activate`. API keys are optional and are read only from environment variables or `.env`. `LEAKSCAN_CONTACT` adds an operator contact to the versioned HTTP User-Agent after control characters are removed.
+On macOS or Linux, activate with `source .venv/bin/activate`. On a Debian/Ubuntu server where you intentionally installed Leakscan into the system Python, update it with `python3 -m pip install --break-system-packages -e .`. API keys are optional and are read only from environment variables or `.env`. `LEAKSCAN_CONTACT` adds an operator contact to the versioned HTTP User-Agent after control characters are removed.
 
 ## Quick start
 
-Preview a case without making network requests:
+Run Leakscan without arguments:
+
+```console
+leakscan
+```
+
+It asks what you are looking for and starts the investigation. Only the first answer is required; it can be a filename, object ID, hash, unique phrase, or public URL. The normal path is three short responses: enter the target, press Enter to skip optional details, and press Enter to start. Choosing optional details adds questions for listing URLs, identifiers, size, aliases, actor names, public Telegram previews, coverage, and the results folder.
+
+The wizard defaults to broad discovery, shows the complete target and destination before starting, saves a reusable case under `~/.local/share/leakscan/cases/`, and stores results under `~/leakscan-results/`. It never labels a hash entered through the wizard as a verified archive hash; those values remain unverified search pivots.
+
+You can also launch the questions explicitly:
+
+```console
+leakscan wizard
+```
+
+If you stop with Ctrl+C, Leakscan prints the exact resume command. At completion, it prints the path to `analyst_summary.md`.
+
+Advanced users can still preview or run a hand-written case:
 
 ```powershell
 leakscan all --dry-run --case cases\example.yaml --output case_output
-```
-
-Run the catalog-first investigation:
-
-```powershell
-leakscan all --case cases\example.yaml --output case_output
-```
-
-Use the broad discovery profile when maximum public-index coverage is more important than run time:
-
-```powershell
 leakscan all --search-profile broad --case cases\example.yaml --output case_output
 ```
 
@@ -75,6 +82,7 @@ case:
       adapter: auto
   item_ids: ["item-id"]
   filenames: ["Example Dataset.7z"]
+  search_hashes: []
   reported_sizes: ["500 MB"]
   distinctive_phrases: ["Example Dataset"]
   aliases: ["Example_Dataset"]
@@ -95,7 +103,7 @@ case:
       notes: "Hash identifies the HTML/report artifact, not the target archive."
 ```
 
-`auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic. Optional `actor_aliases` and `incident_terms` expand event-focused searches. `public_channels` accepts only explicitly configured public Telegram preview URLs; it never selects channels on its own or downloads attachments. Optional `artifacts` entries preserve known sandbox/report provenance and keep page, URL-shortcut, and related-analysis hashes separate from archive payload hashes.
+`seeds` is optional: a filename, identifier, phrase, alias, or `search_hashes` entry is enough to begin discovery. `search_hashes` are explicitly unverified discovery pivots and never become verified payload hashes merely because the operator entered them. `auto` invokes the generic structured-page adapter. Provider-specific catalog adapters can be added without changing case correlation or crawler logic. Optional `actor_aliases` and `incident_terms` expand event-focused searches. `public_channels` accepts only explicitly configured public Telegram preview URLs; it never selects channels on its own or downloads attachments. Optional `artifacts` entries preserve known sandbox/report provenance and keep page, URL-shortcut, and related-analysis hashes separate from archive payload hashes.
 
 ## Discovery providers
 

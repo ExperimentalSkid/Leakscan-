@@ -21,6 +21,7 @@ provider search --new canonical URL--> immediate bounded crawler/verifier
 ## Main components
 
 - `config.py` loads and validates case and runtime settings.
+- `wizard.py` converts a short guided terminal interview into a reusable case file and the normal `all` command, without maintaining a second scan engine.
 - `catalogs.py` parses public listing pages into normalized observations.
 - `providers/` isolates general web search, web archives, uploaded-item/file manifests, dataset hubs, release/package assets, global news, case-configured public channel previews, code search, sandbox metadata, and public-exposure indexes.
 - `search.py` classifies queries by provider capability and applies native pagination, HTTP-boundary request accounting, an adaptive ceiling and plateau detector, host-level throttling, request deduplication, immediate candidate verification, persisted rate-limit cooldowns, and per-provider circuit breakers.

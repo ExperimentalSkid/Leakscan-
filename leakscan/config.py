@@ -38,6 +38,7 @@ class CaseConfig:
     seeds: list[SeedConfig]
     item_ids: list[str] = field(default_factory=list)
     filenames: list[str] = field(default_factory=list)
+    search_hashes: list[str] = field(default_factory=list)
     reported_sizes: list[str] = field(default_factory=list)
     distinctive_phrases: list[str] = field(default_factory=list)
     aliases: list[str] = field(default_factory=list)
@@ -140,9 +141,14 @@ def load_config(
     seeds = [SeedConfig(**item) for item in raw_case.pop("seeds", [])]
     artifacts = [ArtifactReferenceConfig(**item) for item in raw_case.pop("artifacts", [])]
     case = CaseConfig(seeds=seeds, artifacts=artifacts, **raw_case)
-    if not case.seeds:
-        raise ValueError("case file must define at least one public seed URL")
-    if not (case.item_ids or case.filenames or case.distinctive_phrases):
+    if not (
+        case.seeds
+        or case.item_ids
+        or case.filenames
+        or case.search_hashes
+        or case.distinctive_phrases
+        or case.aliases
+    ):
         raise ValueError("case file must define at least one identifying fingerprint")
     default_output = resolved_case.parent.parent / f"case_{_safe_case_name(case.name)}"
     crawl = CrawlConfig(**settings.get("crawl", {}))
@@ -201,6 +207,7 @@ def initial_fingerprints(case: CaseConfig) -> dict[str, set[str]]:
         },
         "exclusion": {value for value in case.exclusion_terms if value},
         "hash": set(),
+        "search_hash": {value.casefold() for value in case.search_hashes if value},
         "artifact_hash": {
             item.get("value", "")
             for artifact in case.artifacts
@@ -271,7 +278,10 @@ def generate_queries(config: AppConfig, fingerprints: dict[str, set[str]] | None
     # floor. Provider request-key deduplication still collapses equivalent
     # archive-index lookups before any network request is made.
     queries.extend(deferred_filename_variants)
-    queries.extend(f'"{digest}"' for digest in sorted(values["hash"] | values["artifact_hash"]))
+    queries.extend(
+        f'"{digest}"'
+        for digest in sorted(values["hash"] | values["search_hash"] | values["artifact_hash"])
+    )
     queries.extend(f'"{seed.url.split("#", 1)[0]}"' for seed in config.case.seeds)
     queries.extend(
         f'"{artifact.report_url}"'

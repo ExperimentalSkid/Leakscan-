@@ -17,6 +17,7 @@ from .providers import build_providers
 from .reporting import export_reports, prepare_output, write_manifest
 from .search import SearchEngine
 from .verifier import verify_candidates
+from .wizard import WizardCancelled, run_wizard
 
 LOG = logging.getLogger("leakscan")
 
@@ -31,10 +32,17 @@ def build_parser() -> argparse.ArgumentParser:
     default_settings = Path(__file__).resolve().with_name("default_settings.yaml")
     parser = argparse.ArgumentParser(
         prog="leakscan",
-        description="Catalog-first public-reference discovery and metadata-only candidate verification.",
+        description=(
+            "Catalog-first public-reference discovery and metadata-only candidate verification. "
+            "Run without arguments for a guided scan."
+        ),
     )
-    parser.add_argument("command", choices=("bootstrap", "search", "crawl", "verify", "report", "all"))
-    parser.add_argument("--case", required=True, help="YAML case file containing the target fingerprints and seed listings")
+    parser.add_argument(
+        "command",
+        choices=("wizard", "bootstrap", "search", "crawl", "verify", "report", "all"),
+        help="Run 'wizard' (or run leakscan with no arguments) for guided setup",
+    )
+    parser.add_argument("--case", help="YAML case file containing target fingerprints and optional seed listings")
     parser.add_argument("--settings", default=str(default_settings), help="Generic YAML runtime settings")
     parser.add_argument("--output", help="Case output directory")
     parser.add_argument("--max-depth", type=int)
@@ -204,6 +212,8 @@ async def _execute(args) -> int:
             export_reports(config, database)
         write_manifest(config, args.command, selected_providers, False, availability, database)
         LOG.info("[DONE] %s", database.stats())
+        if args.command in {"all", "report"}:
+            LOG.info("[REPORT] %s", config.output_dir / "reports" / "analyst_summary.md")
         return 0
     finally:
         database.close()
@@ -211,11 +221,32 @@ async def _execute(args) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
     try:
+        if not raw_args:
+            raw_args = ["wizard"]
+        args = parser.parse_args(raw_args)
+        if args.command == "wizard":
+            args = parser.parse_args(run_wizard())
+        if not args.case:
+            parser.error("--case is required for advanced commands; run 'leakscan' for guided setup")
         return asyncio.run(_execute(args))
+    except WizardCancelled as exc:
+        print(str(exc), file=sys.stderr)
+        return 0
+    except EOFError:
+        print("No interactive input was available. Run 'leakscan --help' for advanced usage.", file=sys.stderr)
+        return 2
     except KeyboardInterrupt:
-        print("Interrupted; use --resume to continue.", file=sys.stderr)
+        if "args" in locals() and args.case and args.output:
+            profile = f" --search-profile {args.search_profile}" if args.search_profile else ""
+            print(
+                "Interrupted safely. Resume with:\n"
+                f"leakscan all --resume --case \"{args.case}\" --output \"{args.output}\"{profile}",
+                file=sys.stderr,
+            )
+        else:
+            print("Interrupted.", file=sys.stderr)
         return 130
     except Exception as exc:  # noqa: BLE001 - CLI boundary converts failures into a stable exit code.
         LOG.error("%s: %s", type(exc).__name__, exc)

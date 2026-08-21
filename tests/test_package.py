@@ -20,6 +20,13 @@ def test_cli_uses_bundled_defaults() -> None:
     assert args.settings.endswith("default_settings.yaml")
 
 
+def test_cli_exposes_guided_wizard_without_case_argument() -> None:
+    args = build_parser().parse_args(["wizard"])
+
+    assert args.command == "wizard"
+    assert args.case is None
+
+
 def test_cli_accepts_explicit_search_breadth(app_config) -> None:
     parser = build_parser()
     args = parser.parse_args([
