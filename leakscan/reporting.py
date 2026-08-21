@@ -15,6 +15,7 @@ from . import __version__
 from .config import AppConfig, generate_queries, keyword_variants_for_values
 from .database import CaseDatabase
 from .models import Finding
+from .scoring import target_identity_basis
 from .utils.time import utc_now
 from .utils.urls import normalize_url
 
@@ -33,7 +34,8 @@ CANDIDATE_FIELDS = [
     "detection_record_url", "detection_record_id", "provider_observed_at", "last_checked",
     "verification_method", "verification_url", "host_object_id", "verified_at",
     "verified_filename", "verified_size_bytes", "verified_sha256", "availability",
-    "current_evidence_path", "sources", "referrer_url",
+    "target_identity_confirmed", "target_identity_basis", "current_evidence_path",
+    "sources", "referrer_url",
 ]
 
 ARTIFACT_REFERENCE_FIELDS = [
@@ -337,7 +339,7 @@ def _write_overview(
         f"- Taken down: **{counts['taken_down']}**",
         f"- Dead or historical: **{counts['dead_or_historical']}**",
         f"- Unresolved or blocked: **{counts['unresolved_or_blocked']}**",
-        f"- Unique target candidates: **{counts['unique_candidates']}**",
+        f"- Unique case-correlated leads: **{counts['unique_candidates']}**",
         f"- Raw observations retained: **{counts['raw_observations']}**", "",
         "## Strongest detection points", "",
     ]
@@ -427,9 +429,14 @@ def _overview_candidate_line(item: dict[str, Any]) -> str:
     provider = item.get("detection_provider") or "unknown provider"
     query = f"; query `{item['detection_query']}`" if item.get("detection_query") else ""
     checked = f"; checked `{item['last_checked']}`" if item.get("last_checked") else ""
+    identity = (
+        f"; target identity via `{', '.join(item['target_identity_basis'])}`"
+        if item.get("target_identity_confirmed")
+        else "; target identity not established"
+    )
     return (
         f"- `{item['current_status']}`{name} — <{item['candidate_url']}>; "
-        f"score {item['maximum_score']}; detected by `{provider}`{query}{checked}."
+        f"score {item['maximum_score']}; detected by `{provider}`{query}{identity}{checked}."
     )
 
 
@@ -521,7 +528,17 @@ def _candidate_summaries(
         point = detection.detection_point or _legacy_detection_point(detection)
         verification = current.verification_point if current else {}
         host_metadata = verification.get("metadata", {})
-        current_status = _current_candidate_status(current, bool(indexed))
+        identity_basis = target_identity_basis([
+            reason
+            for observation in observations
+            for reason in observation.score_reasons
+        ])
+        target_identity_confirmed = bool(identity_basis)
+        current_status = _current_candidate_status(
+            current,
+            bool(indexed),
+            target_identity_confirmed,
+        )
         filename = next(
             (item.filename for item in ([current] if current else []) + observations if item and item.filename),
             "",
@@ -550,6 +567,8 @@ def _candidate_summaries(
             ),
             "verified_sha256": host_metadata.get("hash_sha256", ""),
             "availability": host_metadata.get("availability", ""),
+            "target_identity_confirmed": target_identity_confirmed,
+            "target_identity_basis": identity_basis,
             "current_evidence_path": current.evidence_path if current else "",
             "sources": sorted({item.source for item in observations if item.source}),
             "referrer_url": current.referrer_url if current else detection.referrer_url,
@@ -642,7 +661,11 @@ def _legacy_detection_point(finding: Finding) -> dict[str, str]:
     return point
 
 
-def _current_candidate_status(current: Finding | None, has_index_reference: bool) -> str:
+def _current_candidate_status(
+    current: Finding | None,
+    has_index_reference: bool,
+    target_identity_confirmed: bool = True,
+) -> str:
     if current is None:
         return "UNVERIFIED"
     if current.classification == "TAKEN_DOWN" or current.status_code == 451:
@@ -652,13 +675,15 @@ def _current_candidate_status(current: Finding | None, has_index_reference: bool
     if current.classification == "BLOCKED" or current.status_code in {401, 403, 429, 999}:
         return "BLOCKED"
     if current.classification == "LIVE_RESTRICTED":
-        return "LIVE_RESTRICTED"
+        return "LIVE_RESTRICTED" if target_identity_confirmed else "UNVERIFIED"
     if current.classification == "CONFIRMED_METADATA_ONLY":
-        return "LIVE_METADATA_ONLY"
+        return "LIVE_METADATA_ONLY" if target_identity_confirmed else "UNVERIFIED"
     if current.classification == "LISTING_LIVE":
         return "LISTING_LIVE"
     if current.classification == "DOWNLOAD_ROUTE_LIVE":
         return "DOWNLOAD_ROUTE_LIVE"
+    if current.classification == "UNVERIFIED":
+        return "UNVERIFIED"
     if current.status_code is not None and 200 <= current.status_code < 400:
         return "CURRENT_REFERENCE_ONLY"
     return "UNKNOWN"
@@ -679,10 +704,15 @@ def _candidate_line(item: dict[str, Any]) -> str:
         else ""
     )
     object_id = f"; object `{item['host_object_id']}`" if item["host_object_id"] else ""
+    identity = (
+        f"; target identity via `{', '.join(item['target_identity_basis'])}`"
+        if item.get("target_identity_confirmed")
+        else "; target identity not established"
+    )
     return (
         f"- <{item['candidate_url']}> — `{item['current_status']}`{status}; "
         f"score {item['maximum_score']}; {detection}{query}{record}{record_id}"
-        f"{verification}{object_id}{checked}."
+        f"{verification}{object_id}{identity}{checked}."
     )
 
 
@@ -882,8 +912,9 @@ def _write_analyst_summary(config: AppConfig, database: CaseDatabase, findings: 
     lines.extend([
         "", "## Evidentiary cautions", "",
         "- Search-result snippets and third-party page claims are references, not independent confirmation.",
-        "- Only `LIVE_METADATA_ONLY` means a current response established file-like metadata without reading the archive body.",
-        "- `LIVE_RESTRICTED` means host-native metadata confirms the object but access is restricted.",
+        "- `LIVE_METADATA_ONLY` means a current response established file-like metadata and sufficient target identity without reading the archive body.",
+        "- `LIVE_RESTRICTED` means host-native metadata and sufficient target identity confirm the object, but access is restricted.",
+        "- `UNVERIFIED` can include a live file object whose identity does not sufficiently match the case; it is a lead, not a confirmed target copy.",
         "- `TAKEN_DOWN` means the host reports legal/abuse removal or returned HTTP 451.",
         "- `CURRENT_REFERENCE_ONLY` means a current HTML/reference page exists; it does not prove the archive payload is live.",
         "- `LISTING_LIVE` means a host information/listing page responds; it does not prove the archive payload is live.",

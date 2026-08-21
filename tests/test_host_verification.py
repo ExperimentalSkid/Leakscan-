@@ -11,7 +11,7 @@ from leakscan.host_verifiers import (
     reference_route_classification,
 )
 from leakscan.http import SafeHTTPClient
-from leakscan.models import FetchResult
+from leakscan.models import FetchResult, Finding
 from leakscan.reporting import _candidate_summaries
 from leakscan.utils.time import utc_now
 
@@ -85,6 +85,54 @@ async def test_pixeldrain_metadata_verifies_file_without_archive_body(app_config
     assert summary["verification_method"] == "pixeldrain_api"
     assert summary["host_object_id"] == "NYdQVUGS"
     assert summary["verified_sha256"] == "a" * 64
+    assert summary["target_identity_confirmed"] is True
+
+
+def test_weak_search_fragment_does_not_confirm_unrelated_live_archive(app_config) -> None:
+    url = "https://archive.org/compress/ijds-v11n12-01"
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    try:
+        database.record_finding(Finding(
+            timestamp_utc=utc_now(),
+            discovery_method="search_result",
+            source="archive_org_items",
+            candidate_url=url,
+            normalized_url=url,
+            score=55,
+            score_reasons=[
+                {"points": 35, "reason": "keyword_fragment", "evidence": "National Social Security Fund"},
+                {"points": 20, "reason": "archive_reference", "evidence": "zip"},
+            ],
+            classification="UNVERIFIED",
+        ))
+        finding = Crawler(app_config, database)._record_metadata_finding(
+            {
+                "normalized_url": url,
+                "original_url": url,
+                "referrer_url": "https://archive.org/details/ijds-v11n12-01",
+                "source": "archive_org_items",
+                "query_text": '"National Social Security Fund"',
+                "depth": 0,
+                "priority": 55,
+                "created_at": utc_now(),
+            },
+            FetchResult(
+                original_url=url,
+                final_url=url,
+                status_code=200,
+                headers={
+                    "content-type": "application/zip",
+                    "content-disposition": 'attachment; filename="ijds-v11n12-01.zip"',
+                    "content-length": "123456",
+                },
+            ),
+        )
+    finally:
+        database.close()
+
+    assert finding.classification == "UNVERIFIED"
+    assert finding.verification_point["file_metadata_confirmed"] is True
+    assert finding.verification_point["target_identity_confirmed"] is False
 
 
 @pytest.mark.parametrize(

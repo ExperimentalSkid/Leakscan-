@@ -23,6 +23,21 @@ class ScoreResult:
 
 NON_CORRELATING_REASONS = {"archive_reference", "case_exclusion_term"}
 
+STRONG_TARGET_IDENTITY_REASONS = {
+    "exact_item_id",
+    "exact_filename",
+    "filename_similarity_above_threshold",
+    "known_hash_match",
+}
+
+CORROBORATING_TARGET_IDENTITY_REASONS = {
+    "distinctive_phrase",
+    "case_alias",
+    "keyword_fragment",
+    "catalog_account",
+    "approximate_size_match",
+}
+
 
 def has_case_correlation(result: ScoreResult) -> bool:
     """Return true only when evidence connects a URL to case fingerprints.
@@ -35,6 +50,32 @@ def has_case_correlation(result: ScoreResult) -> bool:
         and item.get("reason", "") not in NON_CORRELATING_REASONS
         for item in result.reasons
     )
+
+
+def target_identity_basis(reasons: list[dict[str, Any]]) -> list[str]:
+    """Return the evidence types that establish the candidate's target identity.
+
+    File/archive metadata proves that an object exists, not that it is the
+    object named by the case. Identity therefore requires one strong exact
+    signal or at least two independent corroborating case fingerprints.
+    """
+    present = {
+        str(item.get("reason", ""))
+        for item in reasons
+        if int(item.get("points", 0)) > 0
+    }
+    if "case_exclusion_term" in {str(item.get("reason", "")) for item in reasons}:
+        return []
+    strong = sorted(present & STRONG_TARGET_IDENTITY_REASONS)
+    if strong:
+        return strong
+    corroborating = sorted(present & CORROBORATING_TARGET_IDENTITY_REASONS)
+    return corroborating if len(corroborating) >= 2 else []
+
+
+def has_target_identity(result: ScoreResult) -> bool:
+    """Return true only when evidence identifies the file as the case target."""
+    return bool(target_identity_basis(result.reasons))
 
 
 def target_size_ranges(reported_sizes: str | list[str], tolerance: float) -> list[tuple[int, int]]:

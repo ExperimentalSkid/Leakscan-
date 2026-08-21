@@ -58,6 +58,9 @@ def test_only_verified_file_metadata_is_called_live() -> None:
         status_code=200,
         classification="LIKELY",
         score=100,
+        score_reasons=[
+            {"points": 90, "reason": "exact_filename", "evidence": "Example Archive.7z"},
+        ],
         last_checked="2026-01-02T00:00:00Z",
     )
     verified_file = Finding.from_dict(current_page.to_dict())
@@ -136,6 +139,59 @@ def test_unrelated_live_archive_is_not_a_target_candidate() -> None:
     )
 
     assert _candidate_summaries([finding], 50) == []
+
+
+def test_weak_fragment_cannot_turn_unrelated_file_metadata_into_live_target(app_config) -> None:
+    url = "https://archive.org/compress/ijds-v11n12-01"
+    detection = Finding(
+        timestamp_utc="2026-01-01T00:00:00Z",
+        discovery_method="search_result",
+        source="archive_org_items",
+        candidate_url=url,
+        normalized_url=url,
+        filename="ijds-v11n12-01.zip",
+        score=55,
+        score_reasons=[
+            {"points": 35, "reason": "keyword_fragment", "evidence": "National Social Security Fund"},
+            {"points": 20, "reason": "archive_reference", "evidence": "zip"},
+        ],
+        classification="UNVERIFIED",
+    )
+    direct = Finding(
+        timestamp_utc="2026-01-02T00:00:00Z",
+        discovery_method="metadata_only_probe",
+        source="archive_org_items",
+        candidate_url=url,
+        normalized_url=url,
+        status_code=200,
+        filename="ijds-v11n12-01.zip",
+        score=20,
+        score_reasons=[
+            {"points": 20, "reason": "archive_reference", "evidence": "zip"},
+        ],
+        classification="CONFIRMED_METADATA_ONLY",
+        last_checked="2026-01-02T00:00:00Z",
+    )
+
+    summary = _candidate_summaries([detection, direct], 50)[0]
+
+    assert summary["current_status"] == "UNVERIFIED"
+    assert summary["target_identity_confirmed"] is False
+    assert summary["target_identity_basis"] == []
+
+    prepare_output(app_config)
+    database = CaseDatabase(app_config.output_dir / "state.sqlite3")
+    try:
+        database.record_finding(detection)
+        database.record_finding(direct)
+        export_reports(app_config, database)
+    finally:
+        database.close()
+    overview = json.loads((app_config.output_dir / "overview.json").read_text(encoding="utf-8"))
+    assert overview["counts"]["live_metadata_only"] == 0
+    assert overview["counts"]["unresolved_or_blocked"] == 1
+    assert overview["top_candidates"][0]["current_status"] == "UNVERIFIED"
+    assert overview["top_candidates"][0]["target_identity_confirmed"] is False
 
 
 def test_legacy_urlscan_observation_recovers_detection_record() -> None:

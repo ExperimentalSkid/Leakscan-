@@ -20,7 +20,14 @@ from .host_verifiers import (
 from .http import SafeHTTPClient
 from .models import FetchResult, Finding
 from .parser import context_excerpt, parse_page
-from .scoring import classify, has_case_correlation, score_candidate, size_matches, target_size_ranges
+from .scoring import (
+    classify,
+    has_case_correlation,
+    score_candidate,
+    size_matches,
+    target_identity_basis,
+    target_size_ranges,
+)
 from .utils.time import utc_now
 from .utils.urls import (
     content_headers_indicate_binary,
@@ -186,6 +193,19 @@ class Crawler:
             hashes=hashes,
             fingerprints=self.database.pivot_map(),
         )
+        related_findings = self.database.findings_for_urls({
+            item["normalized_url"],
+            normalize_url(final_url),
+        })
+        identity_reasons = target_identity_basis([
+            *scored.reasons,
+            *(
+                reason
+                for finding in related_findings
+                for reason in finding.score_reasons
+            ),
+        ])
+        target_identity_confirmed = bool(identity_reasons)
         header_binary = content_headers_indicate_binary(headers, self.config.safety.archive_extensions)
         non_html_archive = (
             looks_like_archive_url(final_url, self.config.safety.archive_extensions)
@@ -206,11 +226,16 @@ class Crawler:
                 blocked=blocked,
                 metadata_archive_confirmed=confirmed,
             )
+        if classification in {"CONFIRMED_METADATA_ONLY", "LIVE_RESTRICTED"} and not target_identity_confirmed:
+            classification = "UNVERIFIED"
         verification = {
             **verification,
             "verified_at": now,
             "status_code": fetch.status_code,
             "classification": classification,
+            "file_metadata_confirmed": confirmed or method.endswith("_api"),
+            "target_identity_confirmed": target_identity_confirmed,
+            "target_identity_basis": identity_reasons,
         }
         metadata = {
             "timestamp_utc": now, "requested_url": item["original_url"], "final_url": final_url,
@@ -234,7 +259,12 @@ class Crawler:
             hashes=hashes,
             depth=item["depth"], score=scored.score, score_reasons=scored.reasons,
             classification=classification, first_seen=item["created_at"], last_checked=now,
-            notes="Metadata-only verification; archive body was not consumed.",
+            notes=(
+                "Metadata-only verification; archive body was not consumed."
+                if target_identity_confirmed
+                else "File-like metadata was observed, but target identity was not established; "
+                "archive body was not consumed."
+            ),
             original_url=item["original_url"], normalized_url=item["normalized_url"],
             evidence_path=str(evidence_path), relation=_supporting_reference_relation(item),
             verification_point=verification,

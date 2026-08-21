@@ -1,4 +1,9 @@
-from leakscan.scoring import classify, score_candidate, target_size_ranges
+from leakscan.scoring import (
+    classify,
+    has_target_identity,
+    score_candidate,
+    target_size_ranges,
+)
 
 
 def test_exact_seed_scoring_is_explained(app_config):
@@ -54,3 +59,25 @@ def test_partial_multiword_filename_plus_archive_evidence_is_likely(app_config):
     assert "keyword_fragment" in reasons
     assert "archive_reference" in reasons
     assert result.score >= app_config.scoring.likely_threshold
+    assert not has_target_identity(result)
+
+
+def test_exact_filename_establishes_target_identity(app_config):
+    result = score_candidate(
+        app_config,
+        "https://files.example/object/opaque-id",
+        filename="Example Dataset.7z",
+    )
+
+    assert has_target_identity(result)
+
+
+def test_phrase_and_matching_size_jointly_establish_target_identity(app_config):
+    result = score_candidate(
+        app_config,
+        "https://files.example/object/opaque-id",
+        context="Example Dataset",
+        size_bytes=549_040_000,
+    )
+
+    assert has_target_identity(result)

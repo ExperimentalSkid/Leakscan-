@@ -142,6 +142,20 @@ class CaseDatabase:
         for row in rows:
             yield Finding.from_dict(json.loads(row["payload_json"]))
 
+    def findings_for_urls(self, urls: Iterable[str]) -> list[Finding]:
+        """Return observations attached to any supplied normalized/final URL."""
+        values = sorted({value for value in urls if value})
+        if not values:
+            return []
+        placeholders = ",".join("?" for _ in values)
+        rows = self.connection.execute(
+            f"""SELECT payload_json FROM findings
+                WHERE normalized_url IN ({placeholders}) OR final_url IN ({placeholders})
+                ORDER BY id""",  # noqa: S608 - placeholders, not values, form the SQL text.
+            (*values, *values),
+        )
+        return [Finding.from_dict(json.loads(row["payload_json"])) for row in rows]
+
     def enqueue_url(
         self,
         original_url: str,

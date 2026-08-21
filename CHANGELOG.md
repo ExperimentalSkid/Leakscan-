@@ -4,6 +4,7 @@ All notable changes to Leakscan are documented here.
 
 ## Unreleased
 
+- Required target-identity evidence before file metadata can be reported as a live case match; weak keyword-plus-archive hits now remain unverified leads.
 - Added top-level Markdown/JSON scan overviews with precise availability buckets, strongest detection points, provider/query coverage, candidate domains, and search fingerprints.
 - Added bounded three-to-five-word filename/alias fragments, relaxed all-token queries, and lower-weight partial-fragment scoring to catch renamed mirrors without broad single-word searches.
 - Added a no-argument guided scan that creates a reusable case and starts broad discovery from only a filename, object ID, hash, phrase, or URL.
